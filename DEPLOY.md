@@ -3,44 +3,84 @@
 ## Быстрый старт (один скрипт)
 
 ```bash
-curl -sSL https://gitlab.com/megapolos/megapolos-core/-/raw/main/install/deploy.sh | sudo bash -- --prod --tunnel
+curl -sSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh \
+  | sudo bash -- --dev
 ```
 
-> Или клонируй этот репозиторий и запусти `deploy.sh` локально — см. раздел [Скрипт deploy.sh](#скрипт-deploysh).
+> Скрипт устанавливает всё необходимое и выводит URL + root-токен для входа.
+
+---
+
+## Что устанавливает скрипт
+
+| Компонент | Зачем нужен |
+|---|---|
+| Node.js 18 | Запуск megapolos-core и megapolos-gui |
+| PostgreSQL | База данных |
+| nodemon + ts-node | Запуск TypeScript-бэкенда |
+| Docker | Билд и запуск контейнеров |
+| Docker Swarm | Оркестрация (`docker stack deploy`) |
+| Ansible | Деплой через плейбуки (`deploy_swarm_dev_mode.yml`) |
+| python3-docker | Нужен Ansible-модулю community.docker |
+| python3-jsondiff | Нужен Ansible-модулю docker_stack |
+| community.docker | Ansible-коллекция с модулями docker_stack, docker_swarm |
 
 ---
 
 ## Системные требования
 
-| Компонент | Минимум | Рекомендуется |
+| | Минимум | Рекомендуется |
 |---|---|---|
 | ОС | Ubuntu 20.04 / Debian 11 | Ubuntu 22.04 LTS |
-| CPU | 1 ядро | 2+ ядра |
 | RAM | 1 GB | 2+ GB |
-| Диск | 5 GB | 20+ GB |
+| Диск | 10 GB | 20+ GB |
 | Node.js | 18.x | 18.x |
 | PostgreSQL | 14+ | 16 |
-| Docker | опционально | 24+ (для управления контейнерами) |
 
 ---
 
 ## Ручная установка (шаг за шагом)
 
-### 1. Установка системных зависимостей
+### 1. Системные зависимости
 
 ```bash
-# Node.js 18 (NodeSource)
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
 
-# PostgreSQL 16
-sudo apt-get install -y postgresql postgresql-contrib
+# Node.js 18
+curl -fsSL https://deb.nodesource.com/setup_18.x | bash -
+apt-get install -y nodejs
 
-# nodemon + ts-node (глобально)
-sudo npm install -g nodemon ts-node
+# PostgreSQL
+apt-get install -y postgresql postgresql-contrib
+
+# Утилиты
+apt-get install -y git curl
+
+# nodemon + ts-node
+npm install -g nodemon ts-node
+
+# Docker
+curl -fsSL https://get.docker.com | sh
+
+# Ansible + Python зависимости для Docker-деплоя
+apt-get install -y ansible python3-docker python3-jsondiff
+
+# Ansible-коллекция community.docker
+ansible-galaxy collection install community.docker
 ```
 
-### 2. Клонирование репозиториев
+### 2. Docker Swarm
+
+Megapolos деплоит контейнеры через Docker Swarm (`docker stack deploy`):
+
+```bash
+docker swarm init
+```
+
+> Если уже в swarm-кластере — пропустить.
+
+### 3. Клонирование репозиториев
 
 ```bash
 cd ~
@@ -48,28 +88,26 @@ git clone https://gitlab.com/megapolos/megapolos-core.git
 git clone https://gitlab.com/megapolos/megapolos-gui.git
 ```
 
-### 3. Настройка PostgreSQL
+### 4. Настройка PostgreSQL
 
 ```bash
-# Запуск сервиса
-sudo service postgresql start
+service postgresql start
 
-# Создание пользователя и базы данных
 sudo -u postgres psql -c "CREATE USER megapolos WITH PASSWORD 'pgdata';"
 sudo -u postgres psql -c "CREATE DATABASE megapolos OWNER megapolos;"
 
-# Применение схемы
+# Применить схему
 sudo -u postgres psql -d megapolos -f ~/megapolos-core/install/newpostgresql.sql
 
-# Выдача прав (ВАЖНО: без этого сервер упадёт с ошибкой permission denied)
+# ВАЖНО: без этих грантов бэкенд падает с "permission denied for table user"
 sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO megapolos;"
 sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO megapolos;"
 sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON SCHEMA public TO megapolos;"
 ```
 
-### 4. Конфигурация бэкенда (megapolos-core)
+### 5. Конфигурация бэкенда
 
-Создай файл `~/megapolos-core/config/config.json`:
+Создать `~/megapolos-core/config/config.json`:
 
 ```json
 {
@@ -79,27 +117,35 @@ sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON SCHEMA public TO 
   "registryUser": "",
   "registryPassword": "",
   "debug": false,
-  "devMode": false,
+  "devMode": true,
   "publicSchema": false,
   "allowUnauthorized": false,
-  "noRoot": false,
+  "noRoot": true,
   "catalogUrl": ""
 }
 ```
 
-> **Dev-режим**: установи `devMode: true` и `noRoot: true` для запуска без sudo и с localhost-контейнерами.
+> **devMode: true** — запускает контейнеры локально без SSH, использует локальный Docker daemon.  
+> **noRoot: true** — позволяет запускать без sudo (только для dev).
 
-### 5. Запуск бэкенда
+### 6. Конфигурация фронтенда
 
 ```bash
-cd ~/megapolos-core
-npm install
+echo '{"server": "http://localhost:5100"}' > ~/megapolos-gui/public/config/config.json
+```
 
-# Dev-режим (с hot-reload)
-nodemon index.ts
+> Если доступ с внешнего URL (CloudFlare tunnel, nginx) — указать внешний адрес бэкенда.  
+> Иначе браузер будет обращаться к `localhost:5100` своей машины, а не сервера.
 
-# Prod-режим (разовый запуск)
-sudo ts-node index.ts
+### 7. Запуск
+
+```bash
+# Установить зависимости
+cd ~/megapolos-core && npm install
+cd ~/megapolos-gui && npm install
+
+# Запустить бэкенд (нужен root для Process.ts uid:0)
+cd ~/megapolos-core && sudo nodemon index.ts
 ```
 
 При первом запуске в консоли появится **root-токен**:
@@ -108,122 +154,187 @@ sudo ts-node index.ts
 Server is running on port 5100
 ```
 
-Сохрани этот токен — он нужен для входа в интерфейс.
-
-### 6. Конфигурация фронтенда (megapolos-gui)
-
 ```bash
-# Для локального доступа
-echo '{"server": "http://localhost:5100"}' > ~/megapolos-gui/public/config/config.json
-
-# Если бэкенд доступен по внешнему URL (см. раздел "Внешний доступ")
-echo '{"server": "https://your-backend-url"}' > ~/megapolos-gui/public/config/config.json
-```
-
-### 7. Запуск фронтенда
-
-```bash
-cd ~/megapolos-gui
-npm install
-
-# Dev-режим (порт 3000, с hot-reload)
-npm run dev
-
-# Prod-режим (собрать и раздать статику)
-npm run build
-npx serve build -p 3000
+# Запустить фронтенд (в другом терминале)
+cd ~/megapolos-gui && npm run dev
 ```
 
 ### 8. Вход в систему
 
-1. Открой `http://localhost:3000` (или внешний URL)
-2. Вставь root-токен из шага 5
-3. Нажми **LOGIN**
+1. Открыть `http://localhost:3000`
+2. Вставить root-токен из консоли
+3. Нажать **LOGIN**
+
+---
+
+## Полный цикл: создание и запуск приложения
+
+После того как Megapolos запущен, для деплоя контейнера нужно:
+
+### Шаг 1 — Добавить репозиторий
+
+Через GUI: ПУСК → Code and applications → Repositories → Add Repository  
+Или через GraphQL:
+
+```graphql
+mutation {
+  createRepository(values: {
+    name: "my-app"
+    url: "/path/to/repo"   # или git URL для remote
+    repositoryType: "local" # "local" или "remote"
+  }) { id }
+}
+```
+
+> Репозиторий должен содержать `Dockerfile` в корне.
+
+### Шаг 2 — Создать ноду
+
+Через GUI: ПУСК → Nodes and instances → Nodes → Add node  
+Или через GraphQL:
+
+```graphql
+mutation {
+  createNode(values: { name: "localhost", host: "localhost", user: "root", password: "root" }) { id }
+}
+```
+
+> В **devMode** нода всегда использует локальный Docker, независимо от `host`.  
+> Бэкенд **должен запускаться от root** — процессы внутри `Process.ts` выполняются с `uid: 0`.
+
+### Шаг 3 — Создать приложение
+
+```graphql
+mutation {
+  installApp(input: { name: "my-app", description: "My Application" })
+}
+```
+
+### Шаг 4 — Создать образ
+
+```graphql
+mutation {
+  createImage(values: {
+    name: "my-app"
+    image: "my-app"          # имя Docker-образа
+    innerPort: 80            # порт внутри контейнера
+    buildNumber: 1
+    app: "<APP_ID>"
+    repository: "<REPO_ID>"  # репозиторий с Dockerfile
+  }) { id }
+}
+```
+
+### Шаг 5 — Собрать образ
+
+```graphql
+mutation {
+  buildImage(imageId: "<IMAGE_ID>")
+}
+```
+
+Megapolos запускает `docker build -t my-app:1 .` в директории репозитория.  
+В devMode образ не пушится в registry.
+
+### Шаг 6 — Создать конфигурацию и версию
+
+```graphql
+mutation {
+  createConfiguration(appId: "<APP_ID>", configurationData: { name: "default", services: [] }) { id }
+}
+
+mutation {
+  createAppVersion(
+    appVersionData: { app: "<APP_ID>", configuration: "<CONF_ID>", buildNumber: 1, version: "1.0.0" }
+    images: [{ imageId: "<IMAGE_ID>" }]
+  ) { id }
+}
+```
+
+### Шаг 7 — Создать и запустить инстанс
+
+```graphql
+mutation {
+  createConfiguratedInstance(
+    appVersionId: "<VERSION_ID>"
+    instanceData: {
+      name: "my-instance"
+      containers: [{
+        name: "my-app"
+        role: "app"
+        node: "<NODE_ID>"
+        image: "<IMAGE_ID>"
+        outerPort: 8080
+        volumes: []
+        dbs: []
+        envs: []
+      }]
+    }
+  ) { id }
+}
+```
+
+### Шаг 8 — Деплоить контейнер
+
+```graphql
+# Это запускает Ansible → docker stack deploy
+mutation {
+  updateNodesOfImage(imageId: "<IMAGE_ID>")
+}
+```
+
+> Именно `updateNodesOfImage`, а **не** `startAppInstance` — последний только меняет статус в БД.  
+> Под капотом запускается: `ansible-playbook deploy_swarm_dev_mode.yml`  
+> Что создаёт Docker Swarm service и запускает контейнер.
 
 ---
 
 ## Внешний доступ
 
-### Вариант A: CloudFlare Tunnel (рекомендуется для быстрого старта)
-
-Не требует домена, публичного IP или настройки firewall.
+### CloudFlare Tunnel (рекомендуется для быстрого старта)
 
 ```bash
-# Установка cloudflared
+# Установка
 curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
   -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
-# Туннель для бэкенда
+# Туннель для бэкенда — скопировать URL и вставить в config.json GUI
 cloudflared tunnel --url http://localhost:5100 &
-# Скопируй URL вида https://xxx.trycloudflare.com → вставь в config.json фронтенда
 
 # Туннель для фронтенда
 cloudflared tunnel --url http://localhost:3000 &
-# Открой полученный URL в браузере
 ```
 
-> ⚠️ Временные туннели (trycloudflare.com) меняют URL при каждом перезапуске.  
-> Для постоянного URL нужен [Cloudflare аккаунт с named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps).
+> ⚠️ При доступе с внешнего URL браузер отправляет GraphQL-запросы к `server` из `config.json`.  
+> Если там `http://localhost:5100` — запросы идут на localhost пользователя, а не сервера.  
+> Нужно указать внешний URL бэкенда.
 
-### Вариант B: Nginx Reverse Proxy
+### Vite allowedHosts
 
-```nginx
-server {
-    listen 80;
-    server_name megapolos.yourdomain.com;
+При доступе через внешний URL Vite блокирует запросы. Добавить в `megapolos-gui/vite.config.ts`:
 
-    location / {
-        proxy_pass http://localhost:3000;
-    }
-
-    location /graphql {
-        proxy_pass http://localhost:5100;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
+```typescript
+server: {
+  allowedHosts: true,
 }
 ```
 
 ---
 
-## Prod-режим через systemd
+## Prod-режим (systemd)
 
 ```bash
-# /etc/systemd/system/megapolos-core.service
-[Unit]
-Description=Megapolos Core
-After=network.target postgresql.service
-
-[Service]
-Type=simple
-WorkingDirectory=/home/megapolos/megapolos-core
-ExecStart=/usr/bin/ts-node index.ts
-Restart=on-failure
-User=root
-
-[Install]
-WantedBy=multi-user.target
+./deploy.sh --prod
 ```
 
-```bash
-# /etc/systemd/system/megapolos-gui.service
-[Unit]
-Description=Megapolos GUI
-After=megapolos-core.service
-
-[Service]
-Type=simple
-WorkingDirectory=/home/megapolos/megapolos-gui
-ExecStart=/usr/bin/npx serve build -p 3000
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
+Создаёт и включает:
+- `/etc/systemd/system/megapolos-core.service`
+- `/etc/systemd/system/megapolos-gui.service`
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now megapolos-core megapolos-gui
+# Управление
+sudo systemctl status megapolos-core megapolos-gui
+sudo journalctl -u megapolos-core -f
 ```
 
 ---
@@ -232,43 +343,57 @@ sudo systemctl enable --now megapolos-core megapolos-gui
 
 ### `permission denied for table user`
 ```bash
-sudo -u postgres psql -d megapolos -c \
-  "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO megapolos;"
-sudo -u postgres psql -d megapolos -c \
-  "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO megapolos;"
+sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO megapolos;"
+sudo -u postgres psql -d megapolos -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO megapolos;"
+```
+
+### `spawn EPERM` при сборке образа
+Бэкенд запускает команды с `uid: 0`. Нужен запуск от root:
+```bash
+sudo nodemon index.ts
+```
+
+### `jsondiff is not installed` (Ansible)
+```bash
+sudo apt-get install -y python3-jsondiff
+# или
+python3 -m pip install jsondiff --break-system-packages
+```
+
+### `No module named 'docker'` (Ansible)
+```bash
+sudo apt-get install -y python3-docker
 ```
 
 ### `Blocked request` в браузере (Vite)
-Добавь в `megapolos-gui/vite.config.ts`:
-```ts
-server: {
-  allowedHosts: true,
-}
+Добавить `allowedHosts: true` в `vite.config.ts` (см. раздел выше).
+
+### Браузер не подключается к бэкенду (Network error)
+Проверить `public/config/config.json` — `server` должен быть внешним URL при доступе не с localhost.
+
+### Токен root не появился в логах
+Бэкенд уже запускался — пользователь создан. Найти токен в БД:
+```bash
+sudo -u postgres psql -d megapolos -c 'SELECT name, token FROM "user";'
 ```
 
-### Фронтенд не подключается к бэкенду (ошибки в Network)
-Проблема: браузер отправляет запросы на `localhost:5100` своей машины, а не сервера.  
-Решение: укажи внешний URL бэкенда в `config.json` (CloudFlare tunnel или nginx).
-
-### `You must run this app as root`
-Установи в `config.json` бэкенда: `"noRoot": true` (для dev) или запускай через `sudo`.
-
-### Токен root не виден в логах
-Бэкенд уже запускался — пользователи созданы. Найди токен в БД:
+### Docker Swarm not initialized
 ```bash
-sudo -u postgres psql -d megapolos -c "SELECT name, token FROM \"user\";"
+docker swarm init
 ```
 
 ---
 
-## Стратегия One-Click Install
+## Флаги скрипта
 
-| Вариант | Команда | Когда использовать |
-|---|---|---|
-| Bash-скрипт | `curl -sSL <url> \| sudo bash` | Linux-серверы, CI/CD |
-| npm CLI | `npx megapolos-cli install` | Dev-машины с Node.js |
-| Бинарник | `./megapolos-install` | Полная независимость от окружения |
-| Docker Compose | `docker compose up` | Изолированная среда |
+```bash
+./deploy.sh --dev              # Dev-режим: nodemon + vite dev server
+./deploy.sh --prod             # Prod-режим: systemd services + built frontend
+./deploy.sh --dev --tunnel     # Dev + CloudFlare tunnels (внешний доступ)
+./deploy.sh --prod --tunnel    # Prod + CloudFlare tunnels
+```
 
-Текущий рекомендуемый подход для серверов: **bash-скрипт** (`deploy.sh`) в этом репозитории.  
-Следующий шаг: npm-пакет `megapolos-cli` на npmjs.com.
+Переменные окружения:
+```bash
+MEGAPOLOS_DIR=/opt/megapolos ./deploy.sh --dev   # установить в другую директорию
+```

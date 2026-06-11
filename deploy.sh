@@ -51,7 +51,13 @@ DB_PORT="5432"
 CORE_PORT="5100"
 GUI_PORT="3000"
 
-SECRET=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)
+SECRET=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32 || true)
+
+# Detect if running inside a Docker container
+IN_DOCKER=false
+if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
+  IN_DOCKER=true
+fi
 
 # =============================================================================
 # 1. Detect OS
@@ -60,10 +66,8 @@ detect_os() {
   if [[ -f /etc/os-release ]]; then
     . /etc/os-release
     OS_ID="${ID:-unknown}"
-    OS_LIKE="${ID_LIKE:-}"
   else
     OS_ID="unknown"
-    OS_LIKE=""
   fi
 
   if command -v apt-get &>/dev/null; then
@@ -76,7 +80,7 @@ detect_os() {
     error "Unsupported package manager. This script supports apt, dnf, yum."
   fi
 
-  info "OS: $OS_ID, package manager: $PKG_MANAGER"
+  info "OS: $OS_ID, package manager: $PKG_MANAGER, in_docker: $IN_DOCKER"
 }
 
 # =============================================================================
@@ -86,26 +90,27 @@ install_deps() {
   info "Installing system dependencies..."
 
   if [[ "$PKG_MANAGER" == "apt" ]]; then
-    sudo apt-get update -qq
+    export DEBIAN_FRONTEND=noninteractive
+    sudo -E apt-get update -qq
 
     # Node.js 18 via NodeSource
     if ! node --version 2>/dev/null | grep -q "^v18"; then
       info "Installing Node.js 18..."
       curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null
-      sudo apt-get install -y nodejs >/dev/null
+      sudo -E apt-get install -y nodejs >/dev/null
     fi
 
     # PostgreSQL
     if ! command -v psql &>/dev/null; then
       info "Installing PostgreSQL..."
-      sudo apt-get install -y postgresql postgresql-contrib >/dev/null
+      sudo -E apt-get install -y postgresql postgresql-contrib >/dev/null
     fi
 
     # Git, curl
-    sudo apt-get install -y git curl >/dev/null
+    sudo -E apt-get install -y git curl >/dev/null
 
   elif [[ "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ]]; then
-    # Node.js 18 via NodeSource
+    # Node.js 18
     if ! node --version 2>/dev/null | grep -q "^v18"; then
       info "Installing Node.js 18..."
       curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - >/dev/null
@@ -158,32 +163,47 @@ clone_repos() {
 # =============================================================================
 # 4. Setup PostgreSQL
 # =============================================================================
-setup_postgres() {
-  info "Starting PostgreSQL..."
-
-  if command -v systemctl &>/dev/null && systemctl is-active --quiet postgresql 2>/dev/null; then
-    : # already running
-  elif command -v service &>/dev/null; then
-    sudo service postgresql start || true
-  elif command -v systemctl &>/dev/null; then
-    sudo systemctl start postgresql || true
+start_postgres() {
+  # Try different methods to start PostgreSQL
+  if command -v pg_ctlcluster &>/dev/null; then
+    PG_VERSION=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+    PG_CLUSTER=$(pg_lsclusters -h | awk '{print $2}' | head -1)
+    sudo pg_ctlcluster "$PG_VERSION" "$PG_CLUSTER" start 2>/dev/null || true
+  elif command -v systemctl &>/dev/null && ! $IN_DOCKER; then
+    sudo systemctl start postgresql 2>/dev/null || true
+  else
+    # Inside Docker or no systemd — start directly
+    if command -v pg_lsclusters &>/dev/null; then
+      PG_VERSION=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+      PG_CLUSTER=$(pg_lsclusters -h | awk '{print $2}' | head -1)
+      sudo -u postgres /usr/lib/postgresql/$PG_VERSION/bin/pg_ctl \
+        start -D /var/lib/postgresql/$PG_VERSION/$PG_CLUSTER \
+        -l /var/log/postgresql/postgres.log 2>/dev/null || true
+    fi
   fi
 
-  sleep 2
+  # Also try service command as fallback
+  sudo service postgresql start 2>/dev/null || true
+  sleep 3
+}
+
+setup_postgres() {
+  info "Starting PostgreSQL..."
+  start_postgres
 
   # Create user if not exists
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" | grep -q 1; then
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | grep -q 1; then
     info "Creating DB user '$DB_USER'..."
-    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';"
+    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null || true
   fi
 
   # Create database if not exists
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" | grep -q 1; then
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1; then
     info "Creating database '$DB_NAME'..."
-    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;"
+    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
   fi
 
-  # Apply schema (idempotent — errors are ok if tables already exist)
+  # Apply schema
   info "Applying database schema..."
   cp "$CORE_DIR/install/newpostgresql.sql" /tmp/megapolos_schema.sql
   sudo -u postgres psql -d "$DB_NAME" -f /tmp/megapolos_schema.sql 2>/dev/null || true
@@ -271,7 +291,6 @@ setup_tunnel() {
     > /tmp/cf-backend.log 2>&1 &
   echo $! > /tmp/cf-backend.pid
 
-  # Wait for backend tunnel URL
   local backend_url=""
   for i in $(seq 1 15); do
     backend_url=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf-backend.log 2>/dev/null | head -1 || true)
@@ -280,7 +299,6 @@ setup_tunnel() {
   done
   [[ -z "$backend_url" ]] && error "CloudFlare backend tunnel failed to start"
 
-  # Update GUI config with external backend URL
   echo "{\"server\": \"$backend_url\"}" > "$GUI_DIR/public/config/config.json"
   success "Backend tunnel: $backend_url"
 
@@ -315,7 +333,7 @@ start_dev() {
   echo $! > /tmp/megapolos-core.pid
   info "Core started (PID $(cat /tmp/megapolos-core.pid))"
 
-  # Wait for core to be ready and extract token
+  # Wait for core to start and extract token
   local token=""
   info "Waiting for core to start..."
   for i in $(seq 1 30); do
@@ -337,18 +355,22 @@ start_dev() {
 # 9b. Start in prod mode (systemd)
 # =============================================================================
 start_prod() {
+  if $IN_DOCKER; then
+    warn "Running inside Docker — using dev mode for services (systemd not available)"
+    start_dev
+    return
+  fi
+
   info "Setting up systemd services..."
 
   # Build GUI
   info "Building GUI..."
   (cd "$GUI_DIR" && npm run build --silent)
 
-  # Install serve if needed
   if ! command -v serve &>/dev/null; then
     sudo npm install -g serve >/dev/null
   fi
 
-  # megapolos-core.service
   sudo tee /etc/systemd/system/megapolos-core.service > /dev/null <<EOF
 [Unit]
 Description=Megapolos Core
@@ -360,14 +382,11 @@ WorkingDirectory=$CORE_DIR
 ExecStart=$(which ts-node) index.ts
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-  # megapolos-gui.service
   sudo tee /etc/systemd/system/megapolos-gui.service > /dev/null <<EOF
 [Unit]
 Description=Megapolos GUI
@@ -379,8 +398,6 @@ WorkingDirectory=$GUI_DIR
 ExecStart=$(which serve) build -p $GUI_PORT
 Restart=on-failure
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
@@ -389,9 +406,8 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now megapolos-core megapolos-gui
 
-  # Extract token from journal
-  info "Waiting for core to start..."
   local token=""
+  info "Waiting for core to start..."
   for i in $(seq 1 30); do
     token=$(sudo journalctl -u megapolos-core -n 50 --no-pager 2>/dev/null \
       | grep -oP "token: '\K[^']+" | head -1 || true)
@@ -430,24 +446,19 @@ print_summary() {
   else
     echo -e "  ${YELLOW}Токен не найден автоматически.${NC}"
     echo -e "  Найди его в логах:"
-    if [[ "$MODE" == "dev" ]]; then
+    if [[ "$MODE" == "dev" ]] || $IN_DOCKER; then
       echo -e "    cat /tmp/megapolos-core.log | grep token"
     else
       echo -e "    sudo journalctl -u megapolos-core | grep token"
-      echo -e "  Или в БД:"
-      echo -e "    sudo -u postgres psql -d $DB_NAME -c 'SELECT name, token FROM \"user\";'"
     fi
+    echo -e "  Или в БД:"
+    echo -e "    sudo -u postgres psql -d $DB_NAME -c 'SELECT name, token FROM \"user\";'"
   fi
 
   echo ""
   echo -e "  Логи:"
-  if [[ "$MODE" == "dev" ]]; then
-    echo -e "    Core: tail -f /tmp/megapolos-core.log"
-    echo -e "    GUI:  tail -f /tmp/megapolos-gui.log"
-  else
-    echo -e "    Core: sudo journalctl -u megapolos-core -f"
-    echo -e "    GUI:  sudo journalctl -u megapolos-gui -f"
-  fi
+  echo -e "    Core: tail -f /tmp/megapolos-core.log"
+  echo -e "    GUI:  tail -f /tmp/megapolos-gui.log"
   echo ""
   echo -e "${GREEN}=====================================================${NC}"
 }
@@ -467,14 +478,13 @@ configure_core
 install_npm
 configure_gui
 
-if [[ "$MODE" == "dev" ]]; then
+if [[ "$MODE" == "dev" ]] || $IN_DOCKER; then
   start_dev
 else
   start_prod
 fi
 
 if [[ "$TUNNEL" == "true" ]]; then
-  # Wait a moment for services to be ready before starting tunnels
   sleep 3
   setup_tunnel
 fi

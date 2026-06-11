@@ -133,6 +133,56 @@ install_deps() {
     sudo npm install -g nodemon ts-node >/dev/null
   fi
 
+  # ==========================================================================
+  # Docker (needed to build and run containers managed by Megapolos)
+  # ==========================================================================
+  if ! command -v docker &>/dev/null; then
+    info "Installing Docker..."
+    curl -fsSL https://get.docker.com | sudo sh >/dev/null
+    sudo usermod -aG docker "$USER" 2>/dev/null || true
+  fi
+
+  # Ensure Docker daemon is running
+  if ! docker info &>/dev/null 2>&1; then
+    sudo service docker start 2>/dev/null || \
+    sudo systemctl start docker 2>/dev/null || true
+    sleep 2
+  fi
+
+  # Initialize Docker Swarm (required for Megapolos container deployment)
+  if ! docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
+    info "Initializing Docker Swarm..."
+    docker swarm init 2>/dev/null || true
+  fi
+
+  # ==========================================================================
+  # Ansible + Python packages (needed for Megapolos Ansible-based deployment)
+  # ==========================================================================
+  if ! command -v ansible &>/dev/null; then
+    info "Installing Ansible..."
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+      sudo -E apt-get install -y ansible >/dev/null
+    else
+      sudo $PKG_MANAGER install -y ansible >/dev/null
+    fi
+  fi
+
+  # Python packages required by community.docker Ansible collection
+  info "Installing Python packages for Ansible (docker, jsondiff)..."
+  if [[ "$PKG_MANAGER" == "apt" ]]; then
+    sudo -E apt-get install -y python3-docker python3-jsondiff >/dev/null
+  else
+    # On rpm-based: use pip
+    python3 -m pip install docker jsondiff --break-system-packages 2>/dev/null || \
+    python3 -m pip install docker jsondiff 2>/dev/null || true
+  fi
+
+  # community.docker Ansible collection (provides docker_stack, docker_swarm modules)
+  if ! ansible-galaxy collection list 2>/dev/null | grep -q "community.docker"; then
+    info "Installing Ansible community.docker collection..."
+    ansible-galaxy collection install community.docker >/dev/null
+  fi
+
   success "Dependencies installed"
 }
 

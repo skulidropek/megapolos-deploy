@@ -149,7 +149,16 @@ cloudflared tunnel --url http://localhost:3000 &
 
 ## Часть 3 — Деплой приложения через Megapolos UI
 
-Полный цикл: репозиторий → app → image → build → instance → deploy.
+Правильный порядок:
+
+```
+Репозиторий → Нода → App → Image → Build
+→ Configuration → App Version → Instance (из версии) → Update nodes
+```
+
+> ⚠️ Инстанс создаётся **на основе App Version**, а не напрямую из образа. Это позволяет версионировать приложения и управлять несколькими инстансами одной версии.
+
+---
 
 ### 3.1 Добавить репозиторий
 
@@ -167,6 +176,8 @@ COPY index.html /usr/share/nginx/html/index.html
 EXPOSE 80
 ```
 
+---
+
 ### 3.2 Добавить ноду
 
 **ПУСК → nodes → ADD NODE**
@@ -177,11 +188,15 @@ EXPOSE 80
 
 > В `devMode` нода использует локальный Docker daemon независимо от поля Host.
 
+---
+
 ### 3.3 Создать приложение
 
 **ПУСК → apps → CREATE NEW APP**
 - Name: `test-app`
 - Description: любая
+
+---
 
 ### 3.4 Создать образ
 
@@ -191,6 +206,10 @@ EXPOSE 80
 - Inner port: `80`
 - Repository: выбрать `test-app`
 
+Образ описывает **как собирать и запускать** один контейнер: какой Dockerfile использовать, на каком порту слушать.
+
+---
+
 ### 3.5 Собрать образ
 
 Нажать **Build image** (кнопка у образа).
@@ -198,28 +217,43 @@ EXPOSE 80
 Megapolos запустит `docker build -t test-app:1 .` в директории репозитория.
 Статус изменится на **Built**.
 
-Прогресс виден в **ПУСК → logs** → запись `Build image test-app`.
+Прогресс: **ПУСК → logs** → запись `Build image test-app`.
+
+---
 
 ### 3.6 Создать конфигурацию
 
 Внутри app → **ADD CONFIGURATION**
 - Name: `default`
 
+Конфигурация описывает **состав сервисов** приложения — какие образы входят в версию, как они взаимодействуют. Один app может иметь несколько конфигураций (например: `default`, `with-redis`, `minimal`).
+
+---
+
 ### 3.7 Создать версию приложения
 
 Внутри app → **ADD APP VERSION**
 - Version: `1.0.0`
-- Image: выбрать `test-app`
+- Configuration: выбрать `default`
+- Images: добавить `test-app`
 
-### 3.8 Создать инстанс
+App Version — это **зафиксированный снапшот** конфигурации + набора образов. Инстансы запускаются именно из версий.
 
-Внутри app → **CREATE INSTANCE**
+---
+
+### 3.8 Создать инстанс из версии
+
+Внутри app → выбрать версию `1.0.0` → **CREATE INSTANCE FROM THIS VERSION**
+
 - Instance name: `test-instance`
-- App version: `1.0.0`
 - Container:
   - Name: `test-app`
   - Node: `localhost`
   - Outer port: `8080`
+
+> Создание инстанса из версии гарантирует что запускается именно та версия, которая была протестирована. Можно создать несколько инстансов одной версии на разных нодах.
+
+---
 
 ### 3.9 Задеплоить контейнер
 
@@ -227,20 +261,39 @@ Megapolos запустит `docker build -t test-app:1 .` в директори�
 
 Это запускает:
 ```
-updateNodesOfImage → Ansible → deploy_swarm_dev_mode.yml → docker stack deploy
+Update nodes → Ansible → deploy_swarm_dev_mode.yml → docker stack deploy
 ```
 
 > ⚠️ **Именно `Update nodes`**, а не `BUILD` или `RESTART` — только эта кнопка реально деплоит контейнер через Ansible.
 
-Прогресс виден в **ПУСК → logs** → запись `Update node localhost`.
+Прогресс: **ПУСК → logs** → запись `Update node localhost`.
+
+---
 
 ### 3.10 Проверить результат
 
-**ПУСК → nodes → localhost** → в разделе Containers должен появиться `test-app: running`.
+- **ПУСК → nodes → localhost** → раздел Containers → `test-app: running`
+- **ПУСК → instances → test-instance** → статус `running`, URL `http://localhost:8080`
 
 ```bash
-docker service ls          # показывает запущенный сервис
+docker service ls          # показывает запущенный Swarm-сервис
 curl http://localhost:8080  # ответ из контейнера
+```
+
+---
+
+### Схема зависимостей
+
+```
+App
+├── Image (test-app) ──── Repository (test-app)
+│     └── [Build image]
+├── Configuration (default)
+│     └── App Version (1.0.0) ──── Image (test-app)
+│           └── [CREATE INSTANCE FROM THIS VERSION]
+│                 └── Instance (test-instance)
+│                       └── Container → Node (localhost) → port 8080
+│                             └── [Update nodes] → docker stack deploy
 ```
 
 ---

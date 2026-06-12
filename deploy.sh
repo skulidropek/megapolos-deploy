@@ -366,7 +366,7 @@ deploy_gui() {
     gui=[r for r in repos if r['name']=='megapolos-gui']; print(gui[0]['id'] if gui else '')" 2>/dev/null || true)
 
   if [[ -z "$repo_id" ]]; then
-    repo_id=$(gql "mutation { createRepository(values: { name: \"megapolos-gui\", url: \"$GUI_DIR\", repositoryType: \"local\" }) { id } }" | \
+    repo_id=$(gql "mutation { createRepository(values: { name: \"megapolos-gui\", url: \"$GUI_REPO\", repositoryType: \"remote\" }) { id } }" | \
       gql_extract "['data']['createRepository']['id']")
     [[ -z "$repo_id" ]] && error "Не удалось создать репозиторий"
     info "Репозиторий создан: $repo_id"

@@ -4,282 +4,174 @@ set -euo pipefail
 # =============================================================================
 # Megapolos Deploy Script
 # Usage:
-#   ./deploy.sh --dev              # dev mode (nodemon + vite)
-#   ./deploy.sh --prod             # prod mode (systemd services)
-#   ./deploy.sh --dev --tunnel     # dev + cloudflare tunnels
-#   ./deploy.sh --prod --tunnel    # prod + cloudflare tunnels
+#   ./deploy.sh --dev              # dev mode
+#   ./deploy.sh --dev --tunnel     # dev + cloudflare tunnels (внешний доступ)
 # =============================================================================
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
-
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# --- Parse args ---
-MODE=""
+# --- Args ---
 TUNNEL=false
-
 for arg in "$@"; do
   case $arg in
-    --dev)    MODE="dev" ;;
-    --prod)   MODE="prod" ;;
+    --dev)    true ;;
     --tunnel) TUNNEL=true ;;
-    --help|-h)
-      echo "Usage: $0 [--dev|--prod] [--tunnel]"
-      exit 0
-      ;;
+    --help|-h) echo "Usage: $0 [--dev] [--tunnel]"; exit 0 ;;
     *) error "Unknown argument: $arg" ;;
   esac
 done
 
-[[ -z "$MODE" ]] && error "Specify --dev or --prod"
-
 INSTALL_DIR="${MEGAPOLOS_DIR:-$HOME/megapolos}"
 CORE_DIR="$INSTALL_DIR/megapolos-core"
 GUI_DIR="$INSTALL_DIR/megapolos-gui"
+CORE_REPO="${MEGAPOLOS_CORE_REPO:-https://github.com/skulidropek/megapolos-core.git}"
+CORE_BRANCH="${MEGAPOLOS_CORE_BRANCH:-self-signed-certs}"
+GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://gitlab.com/megapolos/megapolos-gui.git}"
 
-DB_USER="megapolos"
-DB_PASS="pgdata"
-DB_NAME="megapolos"
-DB_PORT="5432"
-CORE_PORT="5100"
-GUI_PORT="3000"
-
+DB_USER="megapolos"; DB_PASS="pgdata"; DB_NAME="megapolos"; DB_PORT="5432"
+CORE_PORT="5100"; GUI_PORT="3000"
 SECRET=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32 || true)
 
-# Detect if running inside a Docker container
 IN_DOCKER=false
-if [ -f /.dockerenv ] || grep -q docker /proc/1/cgroup 2>/dev/null; then
-  IN_DOCKER=true
-fi
+[ -f /.dockerenv ] && IN_DOCKER=true
+grep -q docker /proc/1/cgroup 2>/dev/null && IN_DOCKER=true
 
-# =============================================================================
-# 1. Detect OS
-# =============================================================================
-detect_os() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    OS_ID="${ID:-unknown}"
-  else
-    OS_ID="unknown"
-  fi
+# GraphQL helper
+gql() {
+  local query="$1"
+  curl -s http://localhost:${CORE_PORT}/graphql -X POST \
+    -H "Content-Type: application/json" \
+    -H "token: ${ROOT_TOKEN:-}" \
+    -d "{\"query\":$(echo "$query" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}" \
+    2>/dev/null
+}
 
-  if command -v apt-get &>/dev/null; then
-    PKG_MANAGER="apt"
-  elif command -v dnf &>/dev/null; then
-    PKG_MANAGER="dnf"
-  elif command -v yum &>/dev/null; then
-    PKG_MANAGER="yum"
-  else
-    error "Unsupported package manager. This script supports apt, dnf, yum."
-  fi
-
-  info "OS: $OS_ID, package manager: $PKG_MANAGER, in_docker: $IN_DOCKER"
+gql_extract() {
+  python3 -c "import json,sys; d=json.load(sys.stdin); print(d$1)" 2>/dev/null
 }
 
 # =============================================================================
-# 2. Install system dependencies
+# 1. Системные зависимости
 # =============================================================================
 install_deps() {
-  info "Installing system dependencies..."
+  info "Установка зависимостей..."
+  export DEBIAN_FRONTEND=noninteractive
+  sudo -E apt-get update -qq
 
-  if [[ "$PKG_MANAGER" == "apt" ]]; then
-    export DEBIAN_FRONTEND=noninteractive
-    sudo -E apt-get update -qq
-
-    # Node.js 18 via NodeSource
-    if ! node --version 2>/dev/null | grep -q "^v18"; then
-      info "Installing Node.js 18..."
-      curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null
-      sudo -E apt-get install -y nodejs >/dev/null
-    fi
-
-    # PostgreSQL
-    if ! command -v psql &>/dev/null; then
-      info "Installing PostgreSQL..."
-      sudo -E apt-get install -y postgresql postgresql-contrib >/dev/null
-    fi
-
-    # Git, curl
-    sudo -E apt-get install -y git curl >/dev/null
-
-  elif [[ "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ]]; then
-    # Node.js 18
-    if ! node --version 2>/dev/null | grep -q "^v18"; then
-      info "Installing Node.js 18..."
-      curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash - >/dev/null
-      sudo $PKG_MANAGER install -y nodejs >/dev/null
-    fi
-
-    # PostgreSQL
-    if ! command -v psql &>/dev/null; then
-      info "Installing PostgreSQL..."
-      sudo $PKG_MANAGER install -y postgresql-server postgresql-contrib >/dev/null
-      sudo postgresql-setup --initdb 2>/dev/null || true
-    fi
-
-    sudo $PKG_MANAGER install -y git curl >/dev/null
+  if ! node --version 2>/dev/null | grep -q "^v18"; then
+    info "Установка Node.js 18..."
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null
+    sudo -E apt-get install -y nodejs >/dev/null
   fi
 
-  # nodemon + ts-node globally
+  if ! command -v psql &>/dev/null; then
+    info "Установка PostgreSQL..."
+    sudo -E apt-get install -y postgresql postgresql-contrib >/dev/null
+  fi
+
+  sudo -E apt-get install -y git curl >/dev/null
+
   if ! command -v nodemon &>/dev/null; then
-    info "Installing nodemon and ts-node globally..."
+    info "Установка nodemon/ts-node..."
     sudo npm install -g nodemon ts-node >/dev/null
   fi
 
-  # ==========================================================================
-  # Docker (needed to build and run containers managed by Megapolos)
-  # ==========================================================================
   if ! command -v docker &>/dev/null; then
-    info "Installing Docker..."
+    info "Установка Docker..."
     curl -fsSL https://get.docker.com | sudo sh >/dev/null
-    sudo usermod -aG docker "$USER" 2>/dev/null || true
   fi
 
-  # Ensure Docker daemon is running
-  if ! docker info &>/dev/null 2>&1; then
-    sudo service docker start 2>/dev/null || \
-    sudo systemctl start docker 2>/dev/null || true
+  if ! docker info &>/dev/null; then
+    sudo service docker start 2>/dev/null || sudo systemctl start docker 2>/dev/null || true
     sleep 2
   fi
 
-  # Initialize Docker Swarm (required for Megapolos container deployment)
   if ! docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q "active"; then
-    info "Initializing Docker Swarm..."
+    info "Инициализация Docker Swarm..."
     docker swarm init 2>/dev/null || true
   fi
 
-  # ==========================================================================
-  # Ansible + Python packages (needed for Megapolos Ansible-based deployment)
-  # ==========================================================================
   if ! command -v ansible &>/dev/null; then
-    info "Installing Ansible..."
-    if [[ "$PKG_MANAGER" == "apt" ]]; then
-      sudo -E apt-get install -y ansible >/dev/null
-    else
-      sudo $PKG_MANAGER install -y ansible >/dev/null
-    fi
+    info "Установка Ansible..."
+    sudo -E apt-get install -y ansible >/dev/null
   fi
 
-  # Python packages required by community.docker Ansible collection
-  info "Installing Python packages for Ansible (docker, jsondiff)..."
-  if [[ "$PKG_MANAGER" == "apt" ]]; then
-    sudo -E apt-get install -y python3-docker python3-jsondiff >/dev/null
-  else
-    # On rpm-based: use pip
-    python3 -m pip install docker jsondiff --break-system-packages 2>/dev/null || \
-    python3 -m pip install docker jsondiff 2>/dev/null || true
-  fi
+  sudo -E apt-get install -y python3-docker python3-jsondiff >/dev/null
+  pip install cryptography --break-system-packages -q 2>/dev/null || true
 
-  # community.docker Ansible collection (provides docker_stack, docker_swarm modules)
   if ! ansible-galaxy collection list 2>/dev/null | grep -q "community.docker"; then
-    info "Installing Ansible community.docker collection..."
+    info "Установка community.docker..."
     ansible-galaxy collection install community.docker >/dev/null
   fi
 
-  success "Dependencies installed"
+  success "Зависимости установлены"
 }
 
 # =============================================================================
-# 3. Clone repositories
+# 2. Репозитории
 # =============================================================================
 clone_repos() {
-  info "Cloning repositories to $INSTALL_DIR..."
+  info "Клонирование репозиториев в $INSTALL_DIR..."
   mkdir -p "$INSTALL_DIR"
 
   if [[ ! -d "$CORE_DIR/.git" ]]; then
-    git clone https://gitlab.com/megapolos/megapolos-core.git "$CORE_DIR"
+    git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
   else
-    info "megapolos-core already cloned, pulling latest..."
-    git -C "$CORE_DIR" pull --ff-only
+    info "megapolos-core уже есть, обновляем..."
+    git -C "$CORE_DIR" pull --ff-only 2>/dev/null || true
   fi
 
   if [[ ! -d "$GUI_DIR/.git" ]]; then
-    git clone https://gitlab.com/megapolos/megapolos-gui.git "$GUI_DIR"
+    git clone "$GUI_REPO" "$GUI_DIR"
   else
-    info "megapolos-gui already cloned, pulling latest..."
-    git -C "$GUI_DIR" pull --ff-only
+    info "megapolos-gui уже есть, обновляем..."
+    git -C "$GUI_DIR" pull --ff-only 2>/dev/null || true
   fi
 
-  success "Repositories ready"
+  success "Репозитории готовы"
 }
 
 # =============================================================================
-# 4. Setup PostgreSQL
+# 3. PostgreSQL
 # =============================================================================
 start_postgres() {
-  # Try different methods to start PostgreSQL
   if command -v pg_ctlcluster &>/dev/null; then
-    PG_VERSION=$(pg_lsclusters -h | awk '{print $1}' | head -1)
-    PG_CLUSTER=$(pg_lsclusters -h | awk '{print $2}' | head -1)
-    sudo pg_ctlcluster "$PG_VERSION" "$PG_CLUSTER" start 2>/dev/null || true
-  elif command -v systemctl &>/dev/null && ! $IN_DOCKER; then
-    sudo systemctl start postgresql 2>/dev/null || true
-  else
-    # Inside Docker or no systemd — start directly
-    if command -v pg_lsclusters &>/dev/null; then
-      PG_VERSION=$(pg_lsclusters -h | awk '{print $1}' | head -1)
-      PG_CLUSTER=$(pg_lsclusters -h | awk '{print $2}' | head -1)
-      sudo -u postgres /usr/lib/postgresql/$PG_VERSION/bin/pg_ctl \
-        start -D /var/lib/postgresql/$PG_VERSION/$PG_CLUSTER \
-        -l /var/log/postgresql/postgres.log 2>/dev/null || true
-    fi
+    PG_VER=$(pg_lsclusters -h | awk '{print $1}' | head -1)
+    PG_CL=$(pg_lsclusters -h | awk '{print $2}' | head -1)
+    sudo pg_ctlcluster "$PG_VER" "$PG_CL" start 2>/dev/null || true
   fi
-
-  # Also try service command as fallback
   sudo service postgresql start 2>/dev/null || true
-  sleep 3
+  sleep 2
 }
 
 setup_postgres() {
-  info "Starting PostgreSQL..."
+  info "Настройка PostgreSQL..."
   start_postgres
 
-  # Create user if not exists
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | grep -q 1; then
-    info "Creating DB user '$DB_USER'..."
-    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null || true
-  fi
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null
 
-  # Create database if not exists
-  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1; then
-    info "Creating database '$DB_NAME'..."
-    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
-  fi
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null
 
-  # Apply schema
-  info "Applying database schema..."
-  cp "$CORE_DIR/install/newpostgresql.sql" /tmp/megapolos_schema.sql
-  sudo -u postgres psql -d "$DB_NAME" -f /tmp/megapolos_schema.sql 2>/dev/null || true
-  rm -f /tmp/megapolos_schema.sql
+  sudo -u postgres psql -d "$DB_NAME" -f "$CORE_DIR/install/newpostgresql.sql" 2>/dev/null || true
 
-  # Grant privileges
-  info "Granting privileges..."
-  sudo -u postgres psql -d "$DB_NAME" -c \
-    "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
-  sudo -u postgres psql -d "$DB_NAME" -c \
-    "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
-  sudo -u postgres psql -d "$DB_NAME" -c \
-    "GRANT ALL PRIVILEGES ON SCHEMA public TO $DB_USER;" 2>/dev/null || true
+  sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
+  sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
+  sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON SCHEMA public TO $DB_USER;" 2>/dev/null || true
 
-  success "PostgreSQL configured"
+  success "PostgreSQL настроен"
 }
 
 # =============================================================================
-# 5. Configure megapolos-core
+# 4. Конфиг и запуск бэкенда
 # =============================================================================
-configure_core() {
-  info "Configuring megapolos-core..."
-
-  local NO_ROOT="false"
-  local DEV_MODE="false"
-  [[ "$MODE" == "dev" ]] && NO_ROOT="true" && DEV_MODE="true"
+configure_and_start_core() {
+  info "Настройка megapolos-core..."
 
   cat > "$CORE_DIR/config/config.json" <<EOF
 {
@@ -289,254 +181,315 @@ configure_core() {
   "registryUser": "",
   "registryPassword": "",
   "debug": false,
-  "devMode": $DEV_MODE,
+  "devMode": true,
   "publicSchema": false,
   "allowUnauthorized": false,
-  "noRoot": $NO_ROOT,
+  "noRoot": true,
   "catalogUrl": ""
 }
 EOF
 
-  success "Core config written"
-}
-
-# =============================================================================
-# 6. Install npm dependencies
-# =============================================================================
-install_npm() {
-  info "Installing npm dependencies for megapolos-core..."
+  info "Установка npm зависимостей для core..."
   (cd "$CORE_DIR" && npm install --silent)
 
-  info "Installing npm dependencies for megapolos-gui..."
-  (cd "$GUI_DIR" && npm install --silent)
+  info "Запуск megapolos-core (от root)..."
+  pkill -f "nodemon index.ts" 2>/dev/null || true
+  pkill -f "ts-node index.ts" 2>/dev/null || true
+  sleep 2
 
-  success "npm dependencies installed"
+  nohup bash -c "cd '$CORE_DIR' && sudo nodemon index.ts" > /tmp/megapolos-core.log 2>&1 &
+  CORE_PID=$!
+
+  info "Ожидание запуска core..."
+  local timeout=60
+  while [[ $timeout -gt 0 ]]; do
+    if grep -q "Server is running on port" /tmp/megapolos-core.log 2>/dev/null; then break; fi
+    sleep 2; ((timeout-=2))
+  done
+  [[ $timeout -le 0 ]] && error "Core не запустился за 60 сек. Лог: /tmp/megapolos-core.log"
+
+  ROOT_TOKEN=$(grep -oP "token: '\K[^']+" /tmp/megapolos-core.log 2>/dev/null | head -1)
+  [[ -z "$ROOT_TOKEN" ]] && error "Токен не найден в логах"
+
+  success "Core запущен, токен получен"
 }
 
 # =============================================================================
-# 7. Configure GUI
+# 5. CloudFlare туннель для бэкенда
 # =============================================================================
-configure_gui() {
-  local backend_url="http://localhost:$CORE_PORT"
-  echo "{\"server\": \"$backend_url\"}" > "$GUI_DIR/public/config/config.json"
-  success "GUI config written (server: $backend_url)"
-}
-
-# =============================================================================
-# 8. CloudFlare tunnel
-# =============================================================================
-setup_tunnel() {
-  info "Setting up CloudFlare tunnels..."
+setup_backend_tunnel() {
+  info "Поднимаем CloudFlare туннель для бэкенда..."
 
   if ! command -v cloudflared &>/dev/null; then
-    info "Downloading cloudflared..."
     curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
       -o /tmp/cloudflared
     sudo mv /tmp/cloudflared /usr/local/bin/cloudflared
     sudo chmod +x /usr/local/bin/cloudflared
   fi
 
-  # Backend tunnel
-  cloudflared tunnel --url "http://localhost:$CORE_PORT" \
-    > /tmp/cf-backend.log 2>&1 &
-  echo $! > /tmp/cf-backend.pid
+  cloudflared tunnel --url "http://localhost:${CORE_PORT}" > /tmp/cf-backend.log 2>&1 &
+  CF_BACKEND_PID=$!
 
-  local backend_url=""
-  for i in $(seq 1 15); do
-    backend_url=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf-backend.log 2>/dev/null | head -1 || true)
-    [[ -n "$backend_url" ]] && break
+  BACKEND_URL=""
+  for i in $(seq 1 20); do
+    BACKEND_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf-backend.log 2>/dev/null | head -1 || true)
+    [[ -n "$BACKEND_URL" ]] && break
     sleep 1
   done
-  [[ -z "$backend_url" ]] && error "CloudFlare backend tunnel failed to start"
+  [[ -z "$BACKEND_URL" ]] && error "CloudFlare backend tunnel не запустился"
 
-  echo "{\"server\": \"$backend_url\"}" > "$GUI_DIR/public/config/config.json"
-  success "Backend tunnel: $backend_url"
-
-  # Frontend tunnel
-  cloudflared tunnel --url "http://localhost:$GUI_PORT" \
-    > /tmp/cf-frontend.log 2>&1 &
-  echo $! > /tmp/cf-frontend.pid
-
-  local frontend_url=""
-  for i in $(seq 1 15); do
-    frontend_url=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf-frontend.log 2>/dev/null | head -1 || true)
-    [[ -n "$frontend_url" ]] && break
-    sleep 1
-  done
-  [[ -z "$frontend_url" ]] && error "CloudFlare frontend tunnel failed to start"
-
-  success "Frontend tunnel: $frontend_url"
-
-  TUNNEL_BACKEND_URL="$backend_url"
-  TUNNEL_FRONTEND_URL="$frontend_url"
+  success "Backend tunnel: $BACKEND_URL"
 }
 
 # =============================================================================
-# 9a. Start in dev mode
+# 6. INIT → PREPARE FOR CORE ноды
 # =============================================================================
-start_dev() {
-  info "Starting in DEV mode..."
+setup_node() {
+  info "Настройка ноды через Megapolos API..."
 
-  # Core
-  nohup bash -c "cd '$CORE_DIR' && nodemon index.ts" \
-    > /tmp/megapolos-core.log 2>&1 &
-  echo $! > /tmp/megapolos-core.pid
-  info "Core started (PID $(cat /tmp/megapolos-core.pid))"
+  # Создать ноду если не существует
+  local existing
+  existing=$(gql "{ getAllNode { id name } }" | gql_extract "['data']['getAllNode'][0]['id']" 2>/dev/null || true)
 
-  # Wait for core to start and extract token
-  local token=""
-  info "Waiting for core to start..."
-  for i in $(seq 1 30); do
-    token=$(grep -oP "token: '\K[^']+" /tmp/megapolos-core.log 2>/dev/null | head -1 || true)
-    [[ -n "$token" ]] && break
-    sleep 1
-  done
-
-  # GUI
-  nohup bash -c "cd '$GUI_DIR' && npm run dev -- --open false" \
-    > /tmp/megapolos-gui.log 2>&1 &
-  echo $! > /tmp/megapolos-gui.pid
-  info "GUI started (PID $(cat /tmp/megapolos-gui.pid))"
-
-  ROOT_TOKEN="$token"
-}
-
-# =============================================================================
-# 9b. Start in prod mode (systemd)
-# =============================================================================
-start_prod() {
-  if $IN_DOCKER; then
-    warn "Running inside Docker — using dev mode for services (systemd not available)"
-    start_dev
-    return
+  if [[ -z "$existing" ]]; then
+    info "Создание ноды localhost..."
+    NODE_ID=$(gql "mutation { createNode(values: { name: \"localhost\", host: \"localhost\", user: \"root\", password: \"root\" }) { id } }" | \
+      gql_extract "['data']['createNode']['id']")
+    [[ -z "$NODE_ID" ]] && error "Не удалось создать ноду"
+  else
+    NODE_ID="$existing"
+    info "Нода уже существует: $NODE_ID"
   fi
 
-  info "Setting up systemd services..."
+  # INIT
+  info "Запуск INIT ноды (установка Docker, Ansible, генерация Root CA)..."
+  gql "mutation { initNode(id: \"$NODE_ID\") }" > /dev/null
 
-  # Build GUI
-  info "Building GUI..."
-  (cd "$GUI_DIR" && npm run build --silent)
-
-  if ! command -v serve &>/dev/null; then
-    sudo npm install -g serve >/dev/null
-  fi
-
-  sudo tee /etc/systemd/system/megapolos-core.service > /dev/null <<EOF
-[Unit]
-Description=Megapolos Core
-After=network.target postgresql.service
-
-[Service]
-Type=simple
-WorkingDirectory=$CORE_DIR
-ExecStart=$(which ts-node) index.ts
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  sudo tee /etc/systemd/system/megapolos-gui.service > /dev/null <<EOF
-[Unit]
-Description=Megapolos GUI
-After=megapolos-core.service
-
-[Service]
-Type=simple
-WorkingDirectory=$GUI_DIR
-ExecStart=$(which serve) build -p $GUI_PORT
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now megapolos-core megapolos-gui
-
-  local token=""
-  info "Waiting for core to start..."
-  for i in $(seq 1 30); do
-    token=$(sudo journalctl -u megapolos-core -n 50 --no-pager 2>/dev/null \
-      | grep -oP "token: '\K[^']+" | head -1 || true)
-    [[ -n "$token" ]] && break
-    sleep 1
+  info "Ожидание завершения INIT..."
+  local timeout=180
+  while [[ $timeout -gt 0 ]]; do
+    local status
+    status=$(gql "{ getAllNode { id lifeStatus } }" | gql_extract "['data']['getAllNode'][0]['lifeStatus']" 2>/dev/null || true)
+    [[ "$status" == "running" ]] && break
+    sleep 5; ((timeout-=5))
   done
 
-  ROOT_TOKEN="$token"
-  success "systemd services enabled and started"
+  # Проверяем что Root CA сгенерирован
+  if [[ ! -f /data/nginx/ssl/ca/ca.crt ]]; then
+    warn "Root CA не найден, пробуем ещё раз..."
+    gql "mutation { initNode(id: \"$NODE_ID\") }" > /dev/null
+    sleep 30
+  fi
+
+  success "INIT завершён"
+
+  # PREPARE FOR CORE
+  info "Запуск PREPARE FOR CORE (настройка nginx для Core API)..."
+  gql "mutation { prepareNodeForCore(id: \"$NODE_ID\") }" > /dev/null
+
+  info "Ожидание core.conf..."
+  local timeout=120
+  while [[ $timeout -gt 0 ]]; do
+    [[ -f /data/nginx/conf/core.conf ]] && break
+    sleep 3; ((timeout-=3))
+  done
+  [[ ! -f /data/nginx/conf/core.conf ]] && warn "core.conf не появился (возможно уже был)"
+
+  success "PREPARE FOR CORE завершён — Core API доступен на порту 5104 (HTTPS)"
 }
 
 # =============================================================================
-# 10. Print summary
+# 7. Деплой Megapolos GUI как приложения
+# =============================================================================
+deploy_gui() {
+  info "Деплой Megapolos GUI через Megapolos..."
+
+  local backend_url="${BACKEND_URL:-http://localhost:${CORE_PORT}}"
+
+  # npm install для GUI
+  info "Установка npm зависимостей для GUI..."
+  (cd "$GUI_DIR" && npm install --silent)
+
+  # 7.1 Репозиторий
+  info "Добавление репозитория megapolos-gui..."
+  local repo_id
+  repo_id=$(gql "{ getAllRepository { id name } }" | \
+    python3 -c "import json,sys; repos=json.load(sys.stdin)['data']['getAllRepository']; \
+    gui=[r for r in repos if r['name']=='megapolos-gui']; print(gui[0]['id'] if gui else '')" 2>/dev/null || true)
+
+  if [[ -z "$repo_id" ]]; then
+    repo_id=$(gql "mutation { createRepository(values: { name: \"megapolos-gui\", url: \"$GUI_DIR\", repositoryType: \"local\" }) { id } }" | \
+      gql_extract "['data']['createRepository']['id']")
+    [[ -z "$repo_id" ]] && error "Не удалось создать репозиторий"
+    info "Репозиторий создан: $repo_id"
+  else
+    info "Репозиторий уже существует: $repo_id"
+  fi
+
+  # 7.2 Приложение
+  info "Создание приложения megapolos-gui..."
+  local app_id
+  app_id=$(gql "{ getAllApp { id name } }" | \
+    python3 -c "import json,sys; apps=json.load(sys.stdin)['data']['getAllApp']; \
+    gui=[a for a in apps if a['name']=='megapolos-gui']; print(gui[0]['id'] if gui else '')" 2>/dev/null || true)
+
+  if [[ -z "$app_id" ]]; then
+    app_id=$(gql "mutation { installApp(input: { name: \"megapolos-gui\", description: \"Megapolos GUI\" }) }" | \
+      python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('installApp',''))" 2>/dev/null || true)
+    [[ -z "$app_id" ]] && error "Не удалось создать приложение"
+    info "Приложение создано: $app_id"
+  else
+    info "Приложение уже существует: $app_id"
+  fi
+
+  # 7.3 Образ
+  info "Создание образа..."
+  local image_id
+  image_id=$(gql "mutation { createImage(values: { name: \"megapolos-gui\", image: \"megapolos-gui\", innerPort: 80, buildNumber: 1, app: \"$app_id\", repository: \"$repo_id\" }) { id } }" | \
+    gql_extract "['data']['createImage']['id']")
+  [[ -z "$image_id" ]] && error "Не удалось создать образ"
+  info "Образ создан: $image_id"
+
+  # 7.4 Сборка образа
+  info "Сборка Docker образа (это может занять несколько минут)..."
+  gql "mutation { buildImage(imageId: \"$image_id\") }" > /dev/null
+
+  info "Ожидание сборки..."
+  local timeout=300
+  while [[ $timeout -gt 0 ]]; do
+    local status
+    status=$(gql "{ getImage(id: \"$image_id\") { buildStatus } }" | \
+      gql_extract "['data']['getImage']['buildStatus']" 2>/dev/null || true)
+    [[ "$status" == "Built" ]] && break
+    [[ "$status" == "Failed" ]] && error "Сборка образа провалилась. Проверь логи в ПУСК → logs"
+    sleep 5; ((timeout-=5))
+  done
+  [[ $timeout -le 0 ]] && error "Сборка образа не завершилась за 5 минут"
+  success "Образ собран"
+
+  # 7.5 Конфигурация
+  info "Создание конфигурации..."
+  local conf_id
+  conf_id=$(gql "mutation { createConfiguration(appId: \"$app_id\", configurationData: { name: \"default\", services: [] }) { id } }" | \
+    gql_extract "['data']['createConfiguration']['id']")
+  [[ -z "$conf_id" ]] && error "Не удалось создать конфигурацию"
+
+  # 7.6 Версия приложения
+  info "Создание версии приложения 1.0.0..."
+  local version_id
+  version_id=$(gql "mutation { createAppVersion(appVersionData: { app: \"$app_id\", configuration: \"$conf_id\", buildNumber: 1, version: \"1.0.0\" }, images: [{ imageId: \"$image_id\" }]) { id } }" | \
+    gql_extract "['data']['createAppVersion']['id']")
+  [[ -z "$version_id" ]] && error "Не удалось создать версию"
+  info "Версия создана: $version_id"
+
+  # 7.7 Инстанс из версии
+  info "Создание инстанса из версии..."
+  local instance_id
+  instance_id=$(gql "mutation { createConfiguratedInstance(appVersionId: \"$version_id\", instanceData: { name: \"megapolos-gui\", containers: [{ name: \"megapolos-gui\", role: \"app\", node: \"$NODE_ID\", image: \"$image_id\", outerPort: $GUI_PORT, volumes: [], dbs: [], envs: [{ name: \"MEGAPOLOS_SERVER\", value: \"$backend_url\" }] }] }) { id } }" | \
+    gql_extract "['data']['createConfiguratedInstance']['id']")
+  [[ -z "$instance_id" ]] && error "Не удалось создать инстанс"
+  info "Инстанс создан: $instance_id"
+
+  # 7.8 Деплой (Update nodes)
+  info "Деплой контейнера (Update nodes → Ansible → docker stack deploy)..."
+  gql "mutation { updateNodesOfImage(imageId: \"$image_id\") }" > /dev/null
+
+  info "Ожидание запуска контейнера..."
+  local timeout=120
+  while [[ $timeout -gt 0 ]]; do
+    local container_status
+    container_status=$(docker service ls --format "{{.Name}} {{.Replicas}}" 2>/dev/null | grep "megapolos-gui\|megapolos_megapolos-gui" | awk '{print $2}' | head -1 || true)
+    [[ "$container_status" == "1/1" ]] && break
+    sleep 5; ((timeout-=5))
+  done
+
+  GUI_URL="http://localhost:${GUI_PORT}"
+  success "Megapolos GUI задеплоен"
+}
+
+# =============================================================================
+# 8. CloudFlare туннель для GUI
+# =============================================================================
+setup_frontend_tunnel() {
+  info "Поднимаем CloudFlare туннель для GUI..."
+
+  # Найти реальный IP хоста (для Docker-in-Docker)
+  local host_gw
+  host_gw=$(python3 -c "
+with open('/proc/net/route') as f:
+    for line in f:
+        parts = line.split()
+        if parts[1] == '00000000':
+            gw = int(parts[2], 16)
+            print(f'{gw&0xff}.{(gw>>8)&0xff}.{(gw>>16)&0xff}.{(gw>>24)&0xff}')
+            break
+" 2>/dev/null || echo "localhost")
+
+  cloudflared tunnel --url "http://${host_gw}:${GUI_PORT}" > /tmp/cf-frontend.log 2>&1 &
+
+  FRONTEND_URL=""
+  for i in $(seq 1 20); do
+    FRONTEND_URL=$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' /tmp/cf-frontend.log 2>/dev/null | head -1 || true)
+    [[ -n "$FRONTEND_URL" ]] && break
+    sleep 1
+  done
+  [[ -z "$FRONTEND_URL" ]] && warn "CloudFlare frontend tunnel не запустился, используй http://localhost:${GUI_PORT}"
+
+  success "Frontend tunnel: ${FRONTEND_URL:-http://localhost:${GUI_PORT}}"
+}
+
+# =============================================================================
+# 9. Итог
 # =============================================================================
 print_summary() {
-  echo ""
-  echo -e "${GREEN}=====================================================${NC}"
-  echo -e "${GREEN}  Megapolos deployed successfully!${NC}"
-  echo -e "${GREEN}=====================================================${NC}"
-  echo ""
-  echo -e "  Mode:    ${BLUE}$MODE${NC}"
-  echo ""
-
-  if [[ "$TUNNEL" == "true" ]]; then
-    echo -e "  Frontend: ${BLUE}${TUNNEL_FRONTEND_URL:-http://localhost:$GUI_PORT}${NC}"
-    echo -e "  Backend:  ${BLUE}${TUNNEL_BACKEND_URL:-http://localhost:$CORE_PORT}${NC}"
-  else
-    echo -e "  Frontend: ${BLUE}http://localhost:$GUI_PORT${NC}"
-    echo -e "  Backend:  ${BLUE}http://localhost:$CORE_PORT${NC}"
-  fi
+  local gui_access="${FRONTEND_URL:-$GUI_URL}"
+  local backend_access="${BACKEND_URL:-http://localhost:${CORE_PORT}}"
 
   echo ""
-  if [[ -n "${ROOT_TOKEN:-}" ]]; then
-    echo -e "  Root token (для входа):"
-    echo -e "  ${YELLOW}$ROOT_TOKEN${NC}"
-  else
-    echo -e "  ${YELLOW}Токен не найден автоматически.${NC}"
-    echo -e "  Найди его в логах:"
-    if [[ "$MODE" == "dev" ]] || $IN_DOCKER; then
-      echo -e "    cat /tmp/megapolos-core.log | grep token"
-    else
-      echo -e "    sudo journalctl -u megapolos-core | grep token"
-    fi
-    echo -e "  Или в БД:"
-    echo -e "    sudo -u postgres psql -d $DB_NAME -c 'SELECT name, token FROM \"user\";'"
-  fi
-
+  echo -e "${GREEN}========================================================${NC}"
+  echo -e "${GREEN}  Megapolos успешно развёрнут!${NC}"
+  echo -e "${GREEN}========================================================${NC}"
+  echo ""
+  echo -e "  GUI:     ${BLUE}${gui_access}${NC}"
+  echo -e "  Backend: ${BLUE}${backend_access}${NC}"
+  echo ""
+  echo -e "  Root токен:"
+  echo -e "  ${YELLOW}${ROOT_TOKEN}${NC}"
+  echo ""
+  echo -e "  Root CA сертификат (установи в браузер):"
+  echo -e "  ${YELLOW}/data/nginx/ssl/ca/ca.crt${NC}"
   echo ""
   echo -e "  Логи:"
-  echo -e "    Core: tail -f /tmp/megapolos-core.log"
-  echo -e "    GUI:  tail -f /tmp/megapolos-gui.log"
+  echo -e "    Core:  tail -f /tmp/megapolos-core.log"
+  echo -e "    Nginx: docker logs nginx -f"
+  echo -e "    GUI:   docker service logs megapolos_megapolos-gui -f 2>/dev/null || docker service logs test_megapolos-gui -f"
   echo ""
-  echo -e "${GREEN}=====================================================${NC}"
+  echo -e "${GREEN}========================================================${NC}"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 ROOT_TOKEN=""
-TUNNEL_BACKEND_URL=""
-TUNNEL_FRONTEND_URL=""
+NODE_ID=""
+BACKEND_URL=""
+FRONTEND_URL=""
+GUI_URL="http://localhost:${GUI_PORT}"
 
-detect_os
 install_deps
 clone_repos
 setup_postgres
-configure_core
-install_npm
-configure_gui
-
-if [[ "$MODE" == "dev" ]] || $IN_DOCKER; then
-  start_dev
-else
-  start_prod
-fi
+configure_and_start_core
 
 if [[ "$TUNNEL" == "true" ]]; then
-  sleep 3
-  setup_tunnel
+  setup_backend_tunnel
+fi
+
+setup_node
+deploy_gui
+
+if [[ "$TUNNEL" == "true" ]]; then
+  setup_frontend_tunnel
 fi
 
 print_summary

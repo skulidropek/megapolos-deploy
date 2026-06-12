@@ -371,7 +371,9 @@ deploy_gui() {
     [[ -z "$repo_id" ]] && error "Не удалось создать репозиторий"
     info "Репозиторий создан: $repo_id"
   else
-    info "Репозиторий уже существует: $repo_id"
+    # Обновляем URL если вдруг остался локальный путь
+    gql "mutation { editRepository(id: \"$repo_id\", values: { url: \"$GUI_REPO\", repositoryType: \"remote\" }) }" > /dev/null
+    info "Репозиторий обновлён: $repo_id → $GUI_REPO"
   fi
 
   # 7.2 Приложение

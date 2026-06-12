@@ -14,6 +14,13 @@ success() { echo -e "${GREEN}[OK]${NC} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
+# Если sudo не установлен — установить (нужен внутри контейнеров где мы root)
+if ! command -v sudo &>/dev/null; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq 2>/dev/null
+  apt-get install -y sudo -qq 2>/dev/null
+fi
+
 # --- Args ---
 TUNNEL=false
 for arg in "$@"; do
@@ -61,6 +68,7 @@ install_deps() {
   info "Установка зависимостей..."
   export DEBIAN_FRONTEND=noninteractive
   sudo -E apt-get update -qq
+  sudo -E apt-get install -y curl git >/dev/null
 
   if ! node --version 2>/dev/null | grep -q "^v18"; then
     info "Установка Node.js 18..."
@@ -118,18 +126,20 @@ clone_repos() {
   info "Клонирование репозиториев в $INSTALL_DIR..."
   mkdir -p "$INSTALL_DIR"
 
-  if [[ ! -d "$CORE_DIR/.git" ]]; then
-    git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
-  else
+  if [[ -d "$CORE_DIR/.git" ]]; then
     info "megapolos-core уже есть, обновляем..."
     git -C "$CORE_DIR" pull --ff-only 2>/dev/null || true
+  else
+    rm -rf "$CORE_DIR" 2>/dev/null || true
+    git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
   fi
 
-  if [[ ! -d "$GUI_DIR/.git" ]]; then
-    git clone "$GUI_REPO" "$GUI_DIR"
-  else
+  if [[ -d "$GUI_DIR/.git" ]]; then
     info "megapolos-gui уже есть, обновляем..."
     git -C "$GUI_DIR" pull --ff-only 2>/dev/null || true
+  else
+    rm -rf "$GUI_DIR" 2>/dev/null || true
+    git clone "$GUI_REPO" "$GUI_DIR"
   fi
 
   success "Репозитории готовы"
@@ -158,7 +168,11 @@ setup_postgres() {
   sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1 || \
     sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null
 
-  sudo -u postgres psql -d "$DB_NAME" -f "$CORE_DIR/install/newpostgresql.sql" 2>/dev/null || true
+  # Копируем схему в /tmp чтобы postgres мог её прочитать
+  cp "$CORE_DIR/install/newpostgresql.sql" /tmp/megapolos_schema.sql
+  chmod 644 /tmp/megapolos_schema.sql
+  sudo -u postgres psql -d "$DB_NAME" -f /tmp/megapolos_schema.sql 2>/dev/null || true
+  rm -f /tmp/megapolos_schema.sql
 
   sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
   sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
@@ -193,9 +207,11 @@ EOF
   (cd "$CORE_DIR" && npm install --silent)
 
   info "Запуск megapolos-core (от root)..."
-  pkill -f "nodemon index.ts" 2>/dev/null || true
-  pkill -f "ts-node index.ts" 2>/dev/null || true
-  sleep 2
+  # Убиваем старые процессы и освобождаем порт
+  sudo pkill -f "nodemon index.ts" 2>/dev/null || true
+  sudo pkill -f "ts-node index.ts" 2>/dev/null || true
+  sudo fuser -k ${CORE_PORT}/tcp 2>/dev/null || true
+  sleep 3
 
   nohup bash -c "cd '$CORE_DIR' && sudo nodemon index.ts" > /tmp/megapolos-core.log 2>&1 &
   CORE_PID=$!
@@ -266,6 +282,7 @@ setup_node() {
   gql "mutation { initNode(id: \"$NODE_ID\") }" > /dev/null
 
   info "Ожидание завершения INIT..."
+  sleep 5
   local timeout=180
   while [[ $timeout -gt 0 ]]; do
     local status
@@ -306,7 +323,7 @@ setup_node() {
     python3 -c "import json,sys; regs=json.load(sys.stdin)['data']['getAllDockerRegistry']; print(regs[0]['id'] if regs else '')" 2>/dev/null || true)
 
   if [[ -z "$reg_id" ]]; then
-    reg_id=$(gql "mutation { createDockerRegistry(values: { host: \"localhost\", user: \"megapolos\", password: \"megapolos\", isDefault: true }) { id } }" | \
+    reg_id=$(gql "mutation { createDockerRegistry(values: { name: \"local\", host: \"localhost\", user: \"megapolos\", password: \"megapolos\", isDefault: true }) { id } }" | \
       gql_extract "['data']['createDockerRegistry']['id']")
     info "Docker Registry создан в БД: $reg_id"
   else
@@ -316,6 +333,8 @@ setup_node() {
   gql "mutation { installRegistryToNode(id: \"$NODE_ID\") }" > /dev/null
 
   info "Ожидание завершения INSTALL REGISTRY..."
+  # Даём время перейти в "updating", потом ждём "running"
+  sleep 5
   local timeout=180
   while [[ $timeout -gt 0 ]]; do
     local status

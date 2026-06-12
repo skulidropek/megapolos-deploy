@@ -382,9 +382,11 @@ deploy_gui() {
     gui=[a for a in apps if a['name']=='megapolos-gui']; print(gui[0]['id'] if gui else '')" 2>/dev/null || true)
 
   if [[ -z "$app_id" ]]; then
-    app_id=$(gql "mutation { installApp(input: { name: \"megapolos-gui\", description: \"Megapolos GUI\" }) }" | \
-      python3 -c "import json,sys; print(json.load(sys.stdin).get('data',{}).get('installApp',''))" 2>/dev/null || true)
-    [[ -z "$app_id" ]] && error "Не удалось создать приложение"
+    gql "mutation { installApp(input: { name: \"megapolos-gui\", description: \"Megapolos GUI\" }) }" > /dev/null
+    # installApp returns bool, get ID via getAllApp
+    app_id=$(gql "{ getAllApp { id name } }" | \
+      python3 -c "import json,sys; apps=json.load(sys.stdin)['data']['getAllApp']; gui=[a for a in apps if a['name']=='megapolos-gui']; print(gui[0]['id'] if gui else '')" 2>/dev/null || true)
+    [[ -z "$app_id" ]] && error "Не удалось создать/найти приложение megapolos-gui"
     info "Приложение создано: $app_id"
   else
     info "Приложение уже существует: $app_id"
@@ -406,8 +408,8 @@ deploy_gui() {
   local timeout=300
   while [[ $timeout -gt 0 ]]; do
     local status
-    status=$(gql "{ getImage(id: \"$image_id\") { buildStatus } }" | \
-      gql_extract "['data']['getImage']['buildStatus']" 2>/dev/null || true)
+    status=$(gql "{ getImage(id: \"$image_id\") { status } }" | \
+      gql_extract "['data']['getImage']['status']" 2>/dev/null || true)
     [[ "$status" == "Built" ]] && break
     [[ "$status" == "Failed" ]] && error "Сборка образа провалилась. Проверь логи в ПУСК → logs"
     sleep 5; ((timeout-=5))

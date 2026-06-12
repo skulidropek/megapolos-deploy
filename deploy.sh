@@ -296,6 +296,35 @@ setup_node() {
   [[ ! -f /data/nginx/conf/core.conf ]] && warn "core.conf не появился (возможно уже был)"
 
   success "PREPARE FOR CORE завершён — Core API доступен на порту 5104 (HTTPS)"
+
+  # INSTALL REGISTRY
+  info "Запуск INSTALL REGISTRY (Docker Registry + SSL + htpasswd)..."
+
+  # Создать запись Docker Registry в базе если не существует
+  local reg_id
+  reg_id=$(gql "{ getAllDockerRegistry { id isDefault } }" | \
+    python3 -c "import json,sys; regs=json.load(sys.stdin)['data']['getAllDockerRegistry']; print(regs[0]['id'] if regs else '')" 2>/dev/null || true)
+
+  if [[ -z "$reg_id" ]]; then
+    reg_id=$(gql "mutation { createDockerRegistry(values: { host: \"localhost\", user: \"megapolos\", password: \"megapolos\", isDefault: true }) { id } }" | \
+      gql_extract "['data']['createDockerRegistry']['id']")
+    info "Docker Registry создан в БД: $reg_id"
+  else
+    info "Docker Registry уже существует: $reg_id"
+  fi
+
+  gql "mutation { installRegistryToNode(id: \"$NODE_ID\") }" > /dev/null
+
+  info "Ожидание завершения INSTALL REGISTRY..."
+  local timeout=180
+  while [[ $timeout -gt 0 ]]; do
+    local status
+    status=$(gql "{ getAllNode { id lifeStatus } }" | gql_extract "['data']['getAllNode'][0]['lifeStatus']" 2>/dev/null || true)
+    [[ "$status" == "running" ]] && break
+    sleep 5; ((timeout-=5))
+  done
+
+  success "INSTALL REGISTRY завершён"
 }
 
 # =============================================================================

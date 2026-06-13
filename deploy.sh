@@ -50,17 +50,18 @@ install_deps() {
     curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1 || true
     command -v docker &>/dev/null || error "Docker не установился"
   fi
-  # запуск dockerd: systemd/service на хосте, либо вручную в контейнере (без systemd)
-  if ! docker info &>/dev/null; then
-    sudo service docker start 2>/dev/null || sudo systemctl start docker 2>/dev/null || true
-    sleep 2
-    if ! docker info &>/dev/null; then
-      # контейнер без systemd: свой dockerd с vfs (overlay-в-overlay не работает)
-      sudo mkdir -p /etc/docker
-      grep -q storage-driver /etc/docker/daemon.json 2>/dev/null || echo '{ "storage-driver": "vfs" }' | sudo tee /etc/docker/daemon.json >/dev/null
+  # запуск dockerd
+  if [[ -f /.dockerenv ]]; then
+    # внутри контейнера свой dockerd ОБЯЗАН быть на vfs (overlay-в-overlay не монтируется)
+    sudo mkdir -p /etc/docker
+    grep -q '"vfs"' /etc/docker/daemon.json 2>/dev/null || echo '{ "storage-driver": "vfs" }' | sudo tee /etc/docker/daemon.json >/dev/null
+    if ! docker info 2>/dev/null | grep -q 'Storage Driver: vfs'; then
+      sudo pkill dockerd 2>/dev/null || true; sleep 2
       sudo bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'
       for i in $(seq 1 20); do docker info &>/dev/null && break; sleep 2; done
     fi
+  else
+    docker info &>/dev/null || { sudo service docker start 2>/dev/null || sudo systemctl start docker 2>/dev/null || true; sleep 2; }
   fi
   docker info &>/dev/null || error "dockerd не запустился"
   docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active || docker swarm init 2>/dev/null || true

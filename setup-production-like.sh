@@ -57,7 +57,12 @@ setup_dns() {
 # --- 2. dockerd (DinD) БЕЗ insecure-registries ---
 setup_dockerd() {
   info "Установка dockerd (vfs, без insecure-registries)..."
-  command -v docker &>/dev/null || curl -fsSL https://get.docker.com | sh >/dev/null
+  # get.docker.com ставит бинари, но в конце пытается systemctl start (нет systemd
+  # в контейнере) и выходит с ненулевым кодом — терпим, dockerd стартуем вручную
+  if ! command -v docker &>/dev/null; then
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || true
+    command -v docker &>/dev/null || error "Docker не установился"
+  fi
   mkdir -p /etc/docker
   echo '{ "storage-driver": "vfs" }' > /etc/docker/daemon.json
   pkill dockerd 2>/dev/null || true; sleep 2

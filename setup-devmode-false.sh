@@ -36,7 +36,11 @@ REGISTRY_PASS="megapolos"
 # =============================================================================
 setup_dockerd() {
   info "Установка и настройка внутреннего dockerd..."
-  command -v docker &>/dev/null || curl -fsSL https://get.docker.com | sh >/dev/null
+  # get.docker.com выходит с ненулевым кодом без systemd — терпим, dockerd стартуем вручную
+  if ! command -v docker &>/dev/null; then
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || true
+    command -v docker &>/dev/null || error "Docker не установился"
+  fi
 
   mkdir -p /etc/docker
   cat > /etc/docker/daemon.json <<EOF

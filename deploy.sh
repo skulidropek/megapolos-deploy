@@ -50,7 +50,19 @@ install_deps() {
     curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1 || true
     command -v docker &>/dev/null || error "Docker не установился"
   fi
-  docker info &>/dev/null || { sudo service docker start 2>/dev/null || true; sleep 2; }
+  # запуск dockerd: systemd/service на хосте, либо вручную в контейнере (без systemd)
+  if ! docker info &>/dev/null; then
+    sudo service docker start 2>/dev/null || sudo systemctl start docker 2>/dev/null || true
+    sleep 2
+    if ! docker info &>/dev/null; then
+      # контейнер без systemd: свой dockerd с vfs (overlay-в-overlay не работает)
+      sudo mkdir -p /etc/docker
+      grep -q storage-driver /etc/docker/daemon.json 2>/dev/null || echo '{ "storage-driver": "vfs" }' | sudo tee /etc/docker/daemon.json >/dev/null
+      sudo bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'
+      for i in $(seq 1 20); do docker info &>/dev/null && break; sleep 2; done
+    fi
+  fi
+  docker info &>/dev/null || error "dockerd не запустился"
   docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active || docker swarm init 2>/dev/null || true
 
   # ansible (современный) + python-зависимости (нужны ansible-модулям docker/crypto)

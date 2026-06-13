@@ -152,8 +152,12 @@ EOF
   (cd /root/megapolos-core && npm install --silent)
 
   info "Запуск megapolos-core..."
+  pkill -f "nodemon index.ts" 2>/dev/null || true
   pkill -f "ts-node index.ts" 2>/dev/null || true
-  sleep 2
+  for i in $(seq 1 15); do
+    python3 -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',5100)) else 1)" 2>/dev/null && break
+    sleep 1
+  done
   # NODE_TLS_REJECT_UNAUTHORIZED=0 — dockerode ходит на self-signed nginx:5102
   cd /root/megapolos-core
   NODE_TLS_REJECT_UNAUTHORIZED=0 nohup nodemon index.ts > /tmp/core.log 2>&1 &

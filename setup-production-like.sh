@@ -126,8 +126,11 @@ setup_repos_db() {
 # --- 6. config (devMode=false, registry=домен) + старт core ---
 start_core() {
   local extra_ca="$1"   # путь к CA или пусто (на первом старте CA ещё нет)
-  local secret; secret=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-32)
-  cat > /root/megapolos-core/config/config.json <<EOF
+  # config.json (с секретом) пишем ТОЛЬКО если его ещё нет — иначе рестарт core
+  # сгенерит новый секрет и инвалидирует root-токен
+  if [[ ! -f /root/megapolos-core/config/config.json ]]; then
+    local secret; secret=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-32)
+    cat > /root/megapolos-core/config/config.json <<EOF
 {
   "secret": "$secret",
   "connectionString": "postgres://megapolos:pgdata@localhost:5432/megapolos",
@@ -138,8 +141,15 @@ start_core() {
   "allowUnauthorized": false, "noRoot": true, "catalogUrl": ""
 }
 EOF
+  fi
   [[ -d /root/megapolos-core/node_modules ]] || (cd /root/megapolos-core && npm install --silent)
-  pkill -f "ts-node index.ts" 2>/dev/null || true; sleep 2
+  # надёжно гасим прошлый core (и nodemon-родитель!) и ждём освобождения порта 5100
+  pkill -f "nodemon index.ts" 2>/dev/null || true
+  pkill -f "ts-node index.ts" 2>/dev/null || true
+  for i in $(seq 1 15); do
+    python3 -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',5100)) else 1)" 2>/dev/null && break
+    sleep 1
+  done
   cd /root/megapolos-core
   if [[ -n "$extra_ca" ]]; then
     NODE_EXTRA_CA_CERTS="$extra_ca" nohup nodemon index.ts > /tmp/core.log 2>&1 &

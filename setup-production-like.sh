@@ -36,13 +36,22 @@ REAL_IP=""; ROOT_TOKEN=""; NODE_ID=""
 gql() { curl -s http://localhost:5100/graphql -X POST -H 'Content-Type: application/json' -H "token: $ROOT_TOKEN" \
   -d "{\"query\":$(echo "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}"; }
 
-# --- 1. DNS: домен → РЕАЛЬНЫЙ IP контейнера (не loopback!) ---
+# --- 1. DNS: wildcard *.домен → РЕАЛЬНЫЙ IP контейнера (не loopback!) ---
 setup_dns() {
   REAL_IP=$(hostname -i | awk '{print $1}')
-  info "DNS: $DOMAIN → $REAL_IP (реальный IP, не loopback)"
+  info "DNS: *.$DOMAIN → $REAL_IP (реальный IP, не loopback)"
+  # /etc/hosts — базовые имена (для самого контейнера)
   grep -v "$DOMAIN" /etc/hosts > /tmp/hosts.new
-  echo "$REAL_IP $DOMAIN registry.$DOMAIN gui.$DOMAIN" >> /tmp/hosts.new
+  echo "$REAL_IP $DOMAIN registry.$DOMAIN" >> /tmp/hosts.new
   cat /tmp/hosts.new > /etc/hosts
+  # dnsmasq — wildcard: любой <repo>.$DOMAIN резолвится автоматически,
+  # чтобы не прописывать каждый домен приложения в /etc/hosts
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get install -y dnsmasq -qq >/dev/null 2>&1
+  echo "address=/$DOMAIN/$REAL_IP" > /etc/dnsmasq.d/megapolos.conf
+  grep -q "^server=" /etc/dnsmasq.conf 2>/dev/null || echo "server=8.8.8.8" >> /etc/dnsmasq.conf
+  pkill dnsmasq 2>/dev/null || true; sleep 1; dnsmasq 2>/dev/null || true
+  success "wildcard DNS: *.$DOMAIN → $REAL_IP (dnsmasq на :53)"
 }
 
 # --- 2. dockerd (DinD) БЕЗ insecure-registries ---
@@ -194,4 +203,10 @@ echo -e "  core:     devMode=false, NODE_EXTRA_CA_CERTS (валидация)"
 echo -e "  Token:    $ROOT_TOKEN"
 echo ""
 echo -e "  Образы пушатся/пуллятся через $DOMAIN:443 с полной TLS-проверкой."
+echo ""
+echo -e "  ${BLUE}Деплой приложения со своим поддоменом:${NC}"
+echo -e "  при createConfiguratedInstance у контейнера укажи:"
+echo -e "    domain: { domainData: { name: \"<repo>.$DOMAIN\" } }"
+echo -e "  Megapolos сам сгенерит cert (Root CA) + nginx vhost, и приложение"
+echo -e "  будет доступно на https://<repo>.$DOMAIN (wildcard DNS уже резолвит)."
 echo -e "${GREEN}=====================================================${NC}"

@@ -129,7 +129,7 @@ setup_repos_db() {
 # =============================================================================
 configure_start_core() {
   info "Запись config.json (devMode=false)..."
-  local secret; secret=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32)
+  local secret; secret=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-32)
   cat > /root/megapolos-core/config/config.json <<EOF
 {
   "secret": "$secret",

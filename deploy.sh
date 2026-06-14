@@ -79,9 +79,10 @@ install_deps() {
   # ansible (современный) + python-зависимости (нужны ansible-модулям docker/crypto)
   sudo -E apt-get install -y ansible -qq >/dev/null 2>&1 || true
   sudo pip3 install --upgrade pip -q 2>/dev/null || true
+  # --ignore-installed: не удалять системный (debian) urllib3 2.x (нет RECORD-файла → pip падает)
   sudo pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' \
-    --break-system-packages -q 2>/dev/null || \
-    sudo pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' -q 2>/dev/null || true
+    --break-system-packages --ignore-installed -q 2>/dev/null || \
+    sudo pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' --ignore-installed -q 2>/dev/null || true
   ansible-galaxy collection install community.docker community.general community.crypto >/dev/null 2>&1 || true
   success "Зависимости установлены"
 }

@@ -83,6 +83,31 @@ docker exec mega tail -f /var/log/deploy.log
 
 ---
 
+## PostgreSQL: свой контейнер на свободном порту
+
+Чтобы **не конфликтовать** с уже работающим на хосте PostgreSQL (например, чужим
+docker-контейнером, занявшим `5432`), `deploy.sh` поднимает **собственный** PostgreSQL в
+Docker:
+
+- выбирает **первый свободный порт** начиная с `5432` (если занят — `5433`, `5434`, …);
+- запускает контейнер `megapolos-postgres` (`postgres:14`) с `-p 127.0.0.1:<порт>:5432`,
+  ролью/БД `megapolos`/`megapolos` и паролем `pgdata`;
+- прописывает выбранный порт в `config.json` (`connectionString`), так что ядро коннектится
+  именно к своему postgres;
+- при повторном запуске **переиспользует** существующий контейнер и его порт (данные не теряются).
+
+Чужой PostgreSQL на `5432` при этом не трогается. Управление:
+
+```bash
+docker logs megapolos-postgres          # логи БД
+docker rm -f megapolos-postgres          # снести БД (следующий deploy.sh поднимет заново)
+```
+
+> apt-версия PostgreSQL больше не ставится — всё в Docker. Образ можно переопределить через
+> `MEGAPOLOS_PG_IMAGE`.
+
+---
+
 ## Сертификаты: что создаётся автоматически
 
 При `devMode=true` (а `deploy.sh` ставит именно его) **ничего руками делать не нужно** — вся
@@ -134,6 +159,7 @@ Token:    <root-токен>
 | `MEGAPOLOS_CORE_BRANCH` | `self-signed-certs` | Ветка ядра |
 | `MEGAPOLOS_GUI_REPO` | `gitlab.com/megapolos/megapolos-gui` | Приложение для авто-деплоя. **Пусто = не деплоить приложение** |
 | `MEGAPOLOS_GUI_DOMAIN` | `gui.megapolos.local` | Домен приложения |
+| `MEGAPOLOS_PG_IMAGE` | `postgres:14` | Образ для контейнера PostgreSQL |
 
 Примеры:
 

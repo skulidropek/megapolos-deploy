@@ -26,7 +26,17 @@ CORE_DIR="$INSTALL_DIR/megapolos-core"
 CORE_REPO="${MEGAPOLOS_CORE_REPO:-https://github.com/skulidropek/megapolos-core.git}"
 CORE_BRANCH="${MEGAPOLOS_CORE_BRANCH:-self-signed-certs}"
 
-DB_USER="megapolos"; DB_PASS="pgdata"; DB_NAME="megapolos"; DB_PORT="5432"; CORE_PORT="5100"
+DB_USER="megapolos"; DB_PASS="pgdata"; DB_NAME="megapolos"; CORE_PORT="5100"
+DB_PORT="5432"                                   # реальное значение выберет setup_postgres
+PG_CONTAINER="megapolos-postgres"
+PG_IMAGE="${MEGAPOLOS_PG_IMAGE:-postgres:14}"
+
+# выбрать свободный TCP-порт начиная с заданного (где никто не слушает на 127.0.0.1)
+pick_free_port() {
+  local p=${1:-5432}
+  while (exec 3<>/dev/tcp/127.0.0.1/"$p") 2>/dev/null; do exec 3>&- 3<&-; p=$((p+1)); done
+  echo "$p"
+}
 
 # приложение для авто-деплоя (по умолчанию — Megapolos GUI). Пусто = не деплоить.
 GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://gitlab.com/megapolos/megapolos-gui.git}"
@@ -43,8 +53,8 @@ install_deps() {
     curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null
     sudo -E apt-get install -y nodejs >/dev/null
   fi
-  command -v psql &>/dev/null || sudo -E apt-get install -y postgresql postgresql-contrib >/dev/null
   command -v nodemon &>/dev/null || sudo npm install -g nodemon ts-node >/dev/null
+  # PostgreSQL ставить через apt НЕ нужно — поднимем свой в Docker (см. setup_postgres)
 
   if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1 || true
@@ -89,24 +99,35 @@ clone_core() {
   success "Ядро склонировано"
 }
 
-# --- 3. PostgreSQL ---
+# --- 3. PostgreSQL (свой контейнер на свободном порту — без конфликта с чужим 5432) ---
 setup_postgres() {
-  info "Настройка PostgreSQL..."
-  command -v pg_ctlcluster &>/dev/null && sudo pg_ctlcluster "$(pg_lsclusters -h | awk '{print $1}' | head -1)" "$(pg_lsclusters -h | awk '{print $2}' | head -1)" start 2>/dev/null || true
-  sudo service postgresql start 2>/dev/null || true
-  sleep 2
-  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'" 2>/dev/null | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev/null
-  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'" 2>/dev/null | grep -q 1 || \
-    sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null
-  cp "$CORE_DIR/install/newpostgresql.sql" /tmp/megapolos_schema.sql; chmod 644 /tmp/megapolos_schema.sql
-  sudo -u postgres psql -d "$DB_NAME" -f /tmp/megapolos_schema.sql 2>/dev/null || true
-  rm -f /tmp/megapolos_schema.sql
-  for g in "ALL TABLES" "ALL SEQUENCES"; do
-    sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON $g IN SCHEMA public TO $DB_USER;" 2>/dev/null || true
+  info "Настройка PostgreSQL (Docker)..."
+  # уже есть наш контейнер — переиспользуем его (и его порт), не теряя данные
+  if docker ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
+    docker start "$PG_CONTAINER" >/dev/null 2>&1 || true
+    DB_PORT=$(docker port "$PG_CONTAINER" 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')
+    DB_PORT=${DB_PORT:-5432}
+    success "PostgreSQL (Docker) уже поднят на 127.0.0.1:$DB_PORT"
+    return
+  fi
+  # выбрать свободный порт (если 5432 занят чужим postgres — возьмём 5433/5434/…)
+  DB_PORT=$(pick_free_port 5432)
+  info "Свободный порт для PostgreSQL: $DB_PORT"
+  docker run -d --name "$PG_CONTAINER" --restart unless-stopped \
+    -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD="$DB_PASS" -e POSTGRES_DB="$DB_NAME" \
+    -p "127.0.0.1:$DB_PORT:5432" "$PG_IMAGE" >/dev/null \
+    || error "не удалось запустить контейнер $PG_CONTAINER"
+  # дождаться готовности
+  local ok=""
+  for i in $(seq 1 30); do
+    docker exec "$PG_CONTAINER" pg_isready -U "$DB_USER" >/dev/null 2>&1 && { ok=1; break; }
+    sleep 2
   done
-  sudo -u postgres psql -d "$DB_NAME" -c "GRANT ALL PRIVILEGES ON SCHEMA public TO $DB_USER;" 2>/dev/null || true
-  success "PostgreSQL настроен"
+  [[ -n "$ok" ]] || error "PostgreSQL не поднялся (docker logs $PG_CONTAINER)"
+  # схема (роль+БД уже созданы переменными окружения образа)
+  docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" \
+    < "$CORE_DIR/install/newpostgresql.sql" >/dev/null 2>&1 || true
+  success "PostgreSQL поднят в Docker на 127.0.0.1:$DB_PORT (контейнер $PG_CONTAINER)"
 }
 
 # --- 4. конфиг + npm install ---
@@ -165,6 +186,7 @@ print_summary() {
   echo -e "${GREEN}  Megapolos развёрнут (оркестрация через install.ts)${NC}"
   echo -e "${GREEN}====================================================${NC}"
   echo -e "  Backend:  http://localhost:${CORE_PORT}"
+  echo -e "  PostgreSQL: 127.0.0.1:${DB_PORT} (контейнер ${PG_CONTAINER})"
   echo -e "  GUI:      https://${GUI_DOMAIN} (через nginx-домен)"
   echo -e "  Root CA:  http://localhost:${CORE_PORT}/api/ca/download"
   echo -e "  Token:    ${ROOT_TOKEN:-см. /tmp/megapolos-core.log}"

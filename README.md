@@ -31,26 +31,31 @@ install.ts ( нода → INIT → PREPARE FOR CORE → INSTALL REGISTRY → д�
 ---
 
 ## Требования
-- **Ubuntu/Debian** (apt), root или sudo.
+- **Ubuntu/Debian** (apt), `sudo` с правами root.
 - Доступ в интернет.
 - Если запускаешь **внутри контейнера** — он должен быть `--privileged` (внутри поднимается
   свой dockerd, docker-in-docker; иначе не соберутся/не задеплоятся образы).
 - ~15–25 минут на полный прогон (зависимости + `npm install` + настройка ноды + сборка образа приложения).
 
+> **Запускается от root.** Megapolos — root-оркестратор (управляет Docker daemon, swarm,
+> `/etc/docker`, ansible, nginx), поэтому скрипт **всегда исполняется от root** и при запуске
+> не из-под root **сам перезапускается через `sudo`**. Это даёт единообразное владение файлами
+> и одинаковое поведение на сервере и локально. Устанавливается в **`/opt/megapolos`**
+> (переопределяется через `MEGAPOLOS_DIR`).
+
 ---
 
 ## Быстрый старт
 
-На хосте/в существующей машине:
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh | sudo bash
 ```
 
 или, если файл уже скачан:
 
 ```bash
-bash deploy.sh
+sudo bash deploy.sh
+# либо просто `bash deploy.sh` — скрипт сам поднимется до root через sudo
 ```
 
 ---
@@ -114,7 +119,7 @@ docker rm -f megapolos-postgres          # снести БД (следующий
 цепочка self-signed сертификатов строится сама внутри `install.ts` + ansible:
 
 1. **Ядро генерит единый Megapolos Root CA** один раз — `ensureMegapolosCA()`, кладёт в
-   `~/megapolos/megapolos-core/data/ca/ca.crt` (+ `ca.key`).
+   `/opt/megapolos/megapolos-core/data/ca/ca.crt` (+ `ca.key`).
 2. При **INIT** ноды этот CA **раздаётся на ноду** (в devMode `runAnsible` инъектит
    `ca_crt`/`ca_key` в данные плейбука — нода НЕ генерит свой CA, использует общий).
 3. Сертификаты для ноды/registry и для **домена приложения** подписываются этим CA (`ownca`),
@@ -154,7 +159,7 @@ Token:    <root-токен>
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `MEGAPOLOS_DIR` | `$HOME/megapolos` | Куда ставить |
+| `MEGAPOLOS_DIR` | `/opt/megapolos` | Куда ставить |
 | `MEGAPOLOS_CORE_REPO` | `github.com/skulidropek/megapolos-core` | Репозиторий ядра |
 | `MEGAPOLOS_CORE_BRANCH` | `self-signed-certs` | Ветка ядра |
 | `MEGAPOLOS_GUI_REPO` | `gitlab.com/megapolos/megapolos-gui` | Приложение для авто-деплоя. **Пусто = не деплоить приложение** |
@@ -188,7 +193,7 @@ MEGAPOLOS_CORE_BRANCH="main" bash deploy.sh
 
 ```bash
 # 1. curl с подменой резолва и доверием CA:
-curl --cacert ~/megapolos/megapolos-core/data/ca/ca.crt \
+curl --cacert /opt/megapolos/megapolos-core/data/ca/ca.crt \
      --resolve gui.megapolos.local:443:127.0.0.1 https://gui.megapolos.local/
 
 # 2. прописать домен в /etc/hosts:

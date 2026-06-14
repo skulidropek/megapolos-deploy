@@ -15,13 +15,25 @@ info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# sudo может отсутствовать (внутри контейнера мы root)
+# Megapolos — root-оркестратор (Docker daemon, swarm, /etc/docker, ansible, nginx).
+# Запускаемся ВСЕГДА от root: единообразное владение файлами и одинаковое поведение
+# на сервере и локально. Если не root — перезапускаем себя через sudo.
+if [ "$(id -u)" -ne 0 ]; then
+  if [ -f "$0" ]; then
+    echo -e "${BLUE}[INFO]${NC} Требуются права root — перезапуск через sudo..."
+    exec sudo -E bash "$0" "$@"
+  else
+    error "Запусти от root:  curl -fsSL <url> | sudo bash"
+  fi
+fi
+
+# sudo может отсутствовать (минимальный образ) — он нужен внутренним вызовам
 if ! command -v sudo &>/dev/null; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq 2>/dev/null && apt-get install -y sudo -qq 2>/dev/null || true
 fi
 
-INSTALL_DIR="${MEGAPOLOS_DIR:-$HOME/megapolos}"
+INSTALL_DIR="${MEGAPOLOS_DIR:-/opt/megapolos}"   # системный путь, не зависит от $HOME/способа запуска
 CORE_DIR="$INSTALL_DIR/megapolos-core"
 CORE_REPO="${MEGAPOLOS_CORE_REPO:-https://github.com/skulidropek/megapolos-core.git}"
 CORE_BRANCH="${MEGAPOLOS_CORE_BRANCH:-self-signed-certs}"

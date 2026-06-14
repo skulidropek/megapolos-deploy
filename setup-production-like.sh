@@ -56,10 +56,20 @@ setup_dns() {
   # чтобы не прописывать каждый домен приложения в /etc/hosts
   export DEBIAN_FRONTEND=noninteractive
   apt-get install -y dnsmasq -qq >/dev/null 2>&1
-  echo "address=/$DOMAIN/$REAL_IP" > /etc/dnsmasq.d/megapolos.conf
-  grep -q "^server=" /etc/dnsmasq.conf 2>/dev/null || echo "server=8.8.8.8" >> /etc/dnsmasq.conf
-  pkill dnsmasq 2>/dev/null || true; sleep 1; dnsmasq 2>/dev/null || true
-  success "wildcard DNS: *.$DOMAIN → $REAL_IP (dnsmasq на :53)"
+  # upstream для внешних доменов берём из текущего resolv.conf (не хардкодим),
+  # на 127.0.0.1 не зацикливаемся
+  local upstream; upstream=$(grep -m1 '^nameserver' /etc/resolv.conf | awk '{print $2}')
+  [[ -z "$upstream" || "$upstream" == "127.0.0.1" ]] && upstream=8.8.8.8
+  # listen/bind на 127.0.0.1 + no-resolv (иначе dnsmasq зациклится на себя через
+  # resolv.conf=127.0.0.1); wildcard *.$DOMAIN → реальный IP, внешние → upstream
+  pkill dnsmasq 2>/dev/null || true; sleep 1
+  dnsmasq --listen-address=127.0.0.1 --bind-interfaces --no-resolv \
+    --server="$upstream" --address=/"$DOMAIN"/"$REAL_IP" 2>/dev/null || true
+  # система должна спрашивать локальный dnsmasq (bind-mount: пишем в тот же inode)
+  echo "nameserver 127.0.0.1" > /etc/resolv.conf
+  getent hosts "gui.$DOMAIN" >/dev/null 2>&1 \
+    && success "wildcard DNS: *.$DOMAIN → $REAL_IP (dnsmasq на :53)" \
+    || error "wildcard DNS *.$DOMAIN не резолвится"
 }
 
 # --- 2. dockerd (DinD) БЕЗ insecure-registries ---

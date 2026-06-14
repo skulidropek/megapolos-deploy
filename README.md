@@ -1,5 +1,7 @@
 # Megapolos — гайд по `deploy.sh`
 
+> 🪟 **На Windows?** Смотри пошаговую инструкцию: **[WINDOWS.md](WINDOWS.md)** (WSL2 + Docker Engine в дистрибутиве).
+
 Тонкий установщик Megapolos для **локальной / dev**-среды. Ставит только то, без чего не
 стартует ядро (Node.js 18, PostgreSQL, Docker, Ansible), а **всю остальную оркестрацию
 делает сам Megapolos** через `install.ts` (TypeScript, без GraphQL/curl из bash):

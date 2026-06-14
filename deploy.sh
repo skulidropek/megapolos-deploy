@@ -156,7 +156,7 @@ configure_core() {
   cat > "$CORE_DIR/config/config.json" <<EOF
 {
   "secret": "$secret",
-  "connectionString": "postgres://$DB_USER:$DB_PASS@localhost:$DB_PORT/$DB_NAME",
+  "connectionString": "postgres://$DB_USER:$DB_PASS@127.0.0.1:$DB_PORT/$DB_NAME",
   "registryHost": "localhost",
   "registryUser": "megapolos",
   "registryPassword": "megapolos",

@@ -186,15 +186,18 @@ bootstrap_and_start() {
   success "Оркестрация Megapolos завершена"
 
   info "Запуск ядра (megapolos-core)..."
+  # лог НЕ в /tmp: на новых Ubuntu fs.protected_regular не даёт писать в чужой файл
+  # в sticky-каталоге даже root. Кладём рядом с установкой.
+  local CORE_LOG="$INSTALL_DIR/core.log"
   sudo pkill -f "nodemon index.ts" 2>/dev/null || true
   sudo pkill -f "ts-node index.ts" 2>/dev/null || true
   sudo fuser -k ${CORE_PORT}/tcp 2>/dev/null || true
   sleep 3
-  nohup bash -c "cd '$CORE_DIR' && sudo nodemon index.ts" > /tmp/megapolos-core.log 2>&1 &
+  nohup bash -c "cd '$CORE_DIR' && sudo nodemon index.ts" > "$CORE_LOG" 2>&1 &
   local t=60
-  while [[ $t -gt 0 ]]; do grep -q "Server is running on port" /tmp/megapolos-core.log 2>/dev/null && break; sleep 2; ((t-=2)); done
-  grep -q "Server is running on port" /tmp/megapolos-core.log || error "Ядро не запустилось (см. /tmp/megapolos-core.log)"
-  ROOT_TOKEN=$(grep -oP "token: '\K[^']+" /tmp/megapolos-core.log 2>/dev/null | head -1)
+  while [[ $t -gt 0 ]]; do grep -q "Server is running on port" "$CORE_LOG" 2>/dev/null && break; sleep 2; ((t-=2)); done
+  grep -q "Server is running on port" "$CORE_LOG" || error "Ядро не запустилось (см. $CORE_LOG)"
+  ROOT_TOKEN=$(grep -oP "token: '\K[^']+" "$CORE_LOG" 2>/dev/null | head -1)
   success "Ядро запущено"
 }
 

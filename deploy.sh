@@ -91,6 +91,10 @@ install_deps() {
 clone_core() {
   info "Клонирование megapolos-core ($CORE_BRANCH)..."
   mkdir -p "$INSTALL_DIR"
+  # прошлый прогон запускал ядро/bootstrap под sudo → часть файлов (temp/, data/,
+  # repositories/) принадлежит root. Заберём владение каталогом, иначе git pull /
+  # npm / последующая чистка упрутся в "Permission denied".
+  sudo chown -R "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
   if [[ -d "$CORE_DIR/.git" ]]; then
     git -C "$CORE_DIR" pull --ff-only 2>/dev/null || true
   else

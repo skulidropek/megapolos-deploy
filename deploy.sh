@@ -40,7 +40,7 @@ CORE_BRANCH="${MEGAPOLOS_CORE_BRANCH:-self-signed-certs}"
 DB_USER="megapolos"; DB_PASS="pgdata"; DB_NAME="megapolos"; CORE_PORT="5100"
 DB_PORT="5432"                                   # реальное значение выберет setup_postgres
 PG_CONTAINER="megapolos-postgres"
-PG_IMAGE="${MEGAPOLOS_PG_IMAGE:-postgres:14}"
+PG_IMAGE="${MEGAPOLOS_PG_IMAGE:-postgres:17}"   # дамп newpostgresql.sql от pg_dump 18 (нужен PG>=17)
 
 # выбрать свободный TCP-порт начиная с заданного (где никто не слушает на 127.0.0.1)
 pick_free_port() {
@@ -126,26 +126,30 @@ setup_postgres() {
     docker start "$PG_CONTAINER" >/dev/null 2>&1 || true
     DB_PORT=$(docker port "$PG_CONTAINER" 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')
     DB_PORT=${DB_PORT:-5432}
-    success "PostgreSQL (Docker) уже поднят на 127.0.0.1:$DB_PORT"
-    return
+  else
+    # выбрать свободный порт (если 5432 занят чужим postgres — возьмём 5433/5434/…)
+    DB_PORT=$(pick_free_port 5432)
+    info "Свободный порт для PostgreSQL: $DB_PORT"
+    docker run -d --name "$PG_CONTAINER" --restart unless-stopped \
+      -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD="$DB_PASS" -e POSTGRES_DB="$DB_NAME" \
+      -p "127.0.0.1:$DB_PORT:5432" "$PG_IMAGE" >/dev/null \
+      || error "не удалось запустить контейнер $PG_CONTAINER"
   fi
-  # выбрать свободный порт (если 5432 занят чужим postgres — возьмём 5433/5434/…)
-  DB_PORT=$(pick_free_port 5432)
-  info "Свободный порт для PostgreSQL: $DB_PORT"
-  docker run -d --name "$PG_CONTAINER" --restart unless-stopped \
-    -e POSTGRES_USER="$DB_USER" -e POSTGRES_PASSWORD="$DB_PASS" -e POSTGRES_DB="$DB_NAME" \
-    -p "127.0.0.1:$DB_PORT:5432" "$PG_IMAGE" >/dev/null \
-    || error "не удалось запустить контейнер $PG_CONTAINER"
-  # дождаться готовности
+  # дождаться готовности (официальный образ один раз перезапускается при init — ждём дольше)
   local ok=""
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     docker exec "$PG_CONTAINER" pg_isready -U "$DB_USER" >/dev/null 2>&1 && { ok=1; break; }
-    sleep 2
+    sleep 1
   done
   [[ -n "$ok" ]] || error "PostgreSQL не поднялся (docker logs $PG_CONTAINER)"
-  # схема (роль+БД уже созданы переменными окружения образа)
-  docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" \
-    < "$CORE_DIR/install/newpostgresql.sql" >/dev/null 2>&1 || true
+  # схема: грузим, если таблиц ещё нет (покрывает и создание, и переиспользование пустого)
+  local tn; tn=$(docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+    "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | tr -d '[:space:]')
+  if [[ "${tn:-0}" -lt 1 ]]; then
+    info "Загрузка схемы БД..."
+    docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" \
+      < "$CORE_DIR/install/newpostgresql.sql" >/dev/null 2>&1 || true
+  fi
   success "PostgreSQL поднят в Docker на 127.0.0.1:$DB_PORT (контейнер $PG_CONTAINER)"
 }
 

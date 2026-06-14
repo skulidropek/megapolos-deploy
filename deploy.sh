@@ -124,7 +124,8 @@ setup_postgres() {
   # уже есть наш контейнер — переиспользуем его (и его порт), не теряя данные
   if docker ps -a --format '{{.Names}}' | grep -qx "$PG_CONTAINER"; then
     docker start "$PG_CONTAINER" >/dev/null 2>&1 || true
-    DB_PORT=$(docker port "$PG_CONTAINER" 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')
+    # `|| true` — под pipefail неуспешный docker port убил бы скрипт молча
+    DB_PORT=$(docker port "$PG_CONTAINER" 5432/tcp 2>/dev/null | head -1 | sed 's/.*://') || true
     DB_PORT=${DB_PORT:-5432}
   else
     # выбрать свободный порт (если 5432 занят чужим postgres — возьмём 5433/5434/…)
@@ -135,17 +136,22 @@ setup_postgres() {
       -p "127.0.0.1:$DB_PORT:5432" "$PG_IMAGE" >/dev/null \
       || error "не удалось запустить контейнер $PG_CONTAINER"
   fi
-  # дождаться готовности (официальный образ один раз перезапускается при init — ждём дольше)
+  # дождаться готовности РЕАЛЬНЫМ запросом: pg_isready может пройти во время init-рестарта
+  # официального образа, после чего следующий psql упадёт. select 1 успешен только когда БД
+  # реально принимает подключения.
   local ok=""
   for i in $(seq 1 60); do
-    docker exec "$PG_CONTAINER" pg_isready -U "$DB_USER" >/dev/null 2>&1 && { ok=1; break; }
+    docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc "select 1" >/dev/null 2>&1 && { ok=1; break; }
     sleep 1
   done
   [[ -n "$ok" ]] || error "PostgreSQL не поднялся (docker logs $PG_CONTAINER)"
-  # схема: грузим, если таблиц ещё нет (покрывает и создание, и переиспользование пустого)
-  local tn; tn=$(docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
-    "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | tr -d '[:space:]')
-  if [[ "${tn:-0}" -lt 1 ]]; then
+  # схема: грузим, если таблиц ещё нет (покрывает и создание, и переиспользование пустого).
+  # `|| true` обязателен: под set -euo pipefail неуспешный psql в $(...) убил бы скрипт молча.
+  local tn=0
+  tn=$(docker exec "$PG_CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -tAc \
+    "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | tr -d '[:space:]') || true
+  [[ -z "$tn" ]] && tn=0
+  if [[ "$tn" -lt 1 ]]; then
     info "Загрузка схемы БД..."
     docker exec -i "$PG_CONTAINER" psql -v ON_ERROR_STOP=0 -U "$DB_USER" -d "$DB_NAME" \
       < "$CORE_DIR/install/newpostgresql.sql" >/dev/null 2>&1 || true

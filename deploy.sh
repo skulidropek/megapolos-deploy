@@ -57,7 +57,8 @@ GUI_DOMAIN="${MEGAPOLOS_GUI_DOMAIN:-gui.megapolos.local}"
 install_deps() {
   info "Установка системных зависимостей..."
   export DEBIAN_FRONTEND=noninteractive
-  sudo -E apt-get update -qq
+  # не роняем установку из-за подвисшего зеркала (частичный fail update — индексы пригодны)
+  sudo -E apt-get update -qq || sudo -E apt-get update -qq || true
   sudo -E apt-get install -y curl git python3-pip openssl -qq >/dev/null
 
   if ! node --version 2>/dev/null | grep -q "^v18"; then

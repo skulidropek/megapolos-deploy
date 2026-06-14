@@ -98,7 +98,9 @@ clone_core() {
   if [[ -d "$CORE_DIR/.git" ]]; then
     git -C "$CORE_DIR" pull --ff-only 2>/dev/null || true
   else
-    rm -rf "$CORE_DIR" 2>/dev/null || true
+    # форсим удаление через sudo — каталог мог остаться от прошлого sudo-прогона
+    # с root-овыми файлами (обычный rm их не возьмёт → git clone упадёт "not empty")
+    sudo rm -rf "$CORE_DIR"
     git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
   fi
   success "Ядро склонировано"

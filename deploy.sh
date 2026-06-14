@@ -51,7 +51,9 @@ pick_free_port() {
 
 # приложение для авто-деплоя (по умолчанию — Megapolos GUI). Пусто = не деплоить.
 GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://gitlab.com/megapolos/megapolos-gui.git}"
-GUI_DOMAIN="${MEGAPOLOS_GUI_DOMAIN:-gui.megapolos.local}"
+# .localhost — браузеры (Edge/Chrome) сами резолвят *.localhost в 127.0.0.1 (без hosts/DNS),
+# поэтому любой {app}.megapolos.localhost открывается без правки hosts
+GUI_DOMAIN="${MEGAPOLOS_GUI_DOMAIN:-gui.megapolos.localhost}"
 
 # --- 1. системные зависимости (то, без чего ядро не стартует) ---
 install_deps() {
@@ -82,10 +84,22 @@ install_deps() {
       bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'
       for i in $(seq 1 20); do docker info &>/dev/null && break; sleep 2; done
     fi
+  elif grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
+    # WSL2: Docker Engine ПРЯМО в дистрибутиве (не Docker Desktop), чтобы ядро+контейнеры
+    # были в одной сети → host-net nginx виден на localhost дистрибутива, а WSL2
+    # пробрасывает его на Windows localhost. systemd в WSL по умолчанию нет → поднимаем
+    # dockerd вручную. overlay2 в WSL2 работает (ядро настоящее), vfs не нужен.
+    if ! docker info &>/dev/null; then
+      # iptables-legacy — частая необходимость для dockerd в WSL2
+      update-alternatives --set iptables /usr/sbin/iptables-legacy 2>/dev/null || true
+      service docker start 2>/dev/null || true
+      docker info &>/dev/null || { pkill dockerd 2>/dev/null || true; sleep 2; bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'; }
+      for i in $(seq 1 30); do docker info &>/dev/null && break; sleep 2; done
+    fi
   else
     docker info &>/dev/null || { service docker start 2>/dev/null || systemctl start docker 2>/dev/null || true; sleep 2; }
   fi
-  docker info &>/dev/null || error "dockerd не запустился"
+  docker info &>/dev/null || error "dockerd не запустился (WSL: проверь, что Docker Desktop WSL-интеграция выключена и /var/log/dockerd.log)"
   docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active || docker swarm init 2>/dev/null || true
 
   # ansible (современный) + python-зависимости (нужны ansible-модулям docker/crypto)

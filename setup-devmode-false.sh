@@ -2,16 +2,21 @@
 set -euo pipefail
 
 # =============================================================================
-# Megapolos devMode=false локальный запуск (полная функциональность)
+# Megapolos локально — быстрый self-signed (TLS-bypass)
 #
-# Поднимает Megapolos с devMode=false локально внутри ОДНОГО контейнера:
+# Поднимает Megapolos локально внутри ОДНОГО контейнера:
 #   - SSH (Ansible ходит на ноду по SSH)
 #   - собственный dockerd (docker-in-docker) с insecure-registry 127.0.0.1:443
-#   - приватный Docker Registry (push/pull образов)
-#   - Docker Swarm деплой
+#   - приватный Docker Registry (push/pull образов), Docker Swarm деплой
 #
-# Отличие от devMode=true: образы реально пушатся в приватный registry
-# и пуллятся оттуда при деплое (как в продакшене), а ноды управляются по SSH.
+# Сертификаты — локальные self-signed (единый Megapolos Root CA), поэтому
+# config.json идёт под devMode=true. Прод-путь (SSH ExternalProcess + push/pull
+# в registry) сохраняется: он выбирается по наличию ноды в БД, а не по флагу.
+# TLS не валидируется (insecure-registry + NODE_TLS_REJECT_UNAUTHORIZED=0) —
+# это и отличает скрипт от setup-production-like.sh (там реальный домен + CA-trust).
+#
+# ВСЯ оркестрация (нода, INIT/PREPARE/REGISTRY, деплой приложения) выполняется
+# самим Megapolos в install.ts (npm run bootstrap). Никаких GraphQL/curl из bash.
 #
 # ВАЖНО: контейнер должен быть запущен как:
 #   docker run -d --name mega --privileged --hostname mega-node \
@@ -26,7 +31,9 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
 CORE_REPO="${MEGAPOLOS_CORE_REPO:-https://github.com/skulidropek/megapolos-core.git}"
 CORE_BRANCH="${MEGAPOLOS_CORE_BRANCH:-self-signed-certs}"
+CORE_DIR="/root/megapolos-core"
 GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://gitlab.com/megapolos/megapolos-gui.git}"
+GUI_DOMAIN="${MEGAPOLOS_GUI_DOMAIN:-gui.megapolos.local}"
 REGISTRY_HOST="127.0.0.1"
 REGISTRY_USER="megapolos"
 REGISTRY_PASS="megapolos"
@@ -86,7 +93,7 @@ install_deps() {
   info "Установка зависимостей..."
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y curl git python3-pip -qq >/dev/null 2>&1
+  apt-get install -y curl git python3-pip openssl -qq >/dev/null 2>&1
 
   if ! node --version 2>/dev/null | grep -q "^v18"; then
     curl -fsSL https://deb.nodesource.com/setup_18.x | bash - >/dev/null 2>&1
@@ -109,9 +116,9 @@ install_deps() {
 # 4. Клонирование + PostgreSQL
 # =============================================================================
 setup_repos_db() {
-  info "Клонирование репозиториев..."
-  [[ -d /root/megapolos-core/.git ]] || git clone --branch "$CORE_BRANCH" "$CORE_REPO" /root/megapolos-core
-  [[ -d /root/megapolos-gui/.git ]]  || git clone "$GUI_REPO" /root/megapolos-gui
+  info "Клонирование ядра..."
+  [[ -d "$CORE_DIR/.git" ]] || git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
+  (cd "$CORE_DIR" && npm install --silent)
 
   info "Настройка PostgreSQL..."
   service postgresql start
@@ -119,22 +126,25 @@ setup_repos_db() {
     su - postgres -c "psql -c \"CREATE USER megapolos WITH PASSWORD 'pgdata';\""
   su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='megapolos'\"" | grep -q 1 || \
     su - postgres -c "psql -c \"CREATE DATABASE megapolos OWNER megapolos;\""
-  cp /root/megapolos-core/install/newpostgresql.sql /tmp/schema.sql && chmod 644 /tmp/schema.sql
+  cp "$CORE_DIR/install/newpostgresql.sql" /tmp/schema.sql && chmod 644 /tmp/schema.sql
   su - postgres -c "psql -d megapolos -f /tmp/schema.sql" >/dev/null 2>&1 || true
   for g in "ALL TABLES" "ALL SEQUENCES"; do
     su - postgres -c "psql -d megapolos -c 'GRANT ALL PRIVILEGES ON $g IN SCHEMA public TO megapolos;'" >/dev/null 2>&1
   done
   su - postgres -c "psql -d megapolos -c 'GRANT ALL PRIVILEGES ON SCHEMA public TO megapolos;'" >/dev/null 2>&1
-  success "Репозитории и БД готовы"
+  success "Ядро и БД готовы"
 }
 
 # =============================================================================
-# 5. Конфиг devMode=false + запуск core
+# 5. Конфиг (devMode=true, local self-signed)
 # =============================================================================
-configure_start_core() {
-  info "Запись config.json (devMode=false)..."
+configure_core() {
+  info "Запись config.json (devMode=true, local self-signed)..."
+  # config.json пишем ТОЛЬКО если его ещё нет — иначе перезапись сгенерит новый
+  # секрет и инвалидирует root-токен
+  [[ -f "$CORE_DIR/config/config.json" ]] && { success "config.json уже есть"; return; }
   local secret; secret=$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | cut -c1-32)
-  cat > /root/megapolos-core/config/config.json <<EOF
+  cat > "$CORE_DIR/config/config.json" <<EOF
 {
   "secret": "$secret",
   "connectionString": "postgres://megapolos:pgdata@localhost:5432/megapolos",
@@ -142,93 +152,77 @@ configure_start_core() {
   "registryUser": "$REGISTRY_USER",
   "registryPassword": "$REGISTRY_PASS",
   "debug": false,
-  "devMode": false,
+  "devMode": true,
   "publicSchema": false,
   "allowUnauthorized": false,
   "noRoot": true,
   "catalogUrl": ""
 }
 EOF
-  (cd /root/megapolos-core && npm install --silent)
+  success "config.json записан"
+}
 
+# =============================================================================
+# 6. Оркестрация Megapolos (install.ts) — нода, INIT/PREPARE/REGISTRY, деплой
+#    NODE_TLS_REJECT_UNAUTHORIZED=0 — dockerode ходит на self-signed nginx:5102
+# =============================================================================
+bootstrap() {
+  info "Оркестрация через install.ts (нода, INIT/PREPARE/REGISTRY, деплой)..."
+  (cd "$CORE_DIR" && \
+    NODE_TLS_REJECT_UNAUTHORIZED=0 \
+    MEGAPOLOS_NODE_HOST="127.0.0.1" \
+    MEGAPOLOS_REGISTRY_HOST="$REGISTRY_HOST" \
+    MEGAPOLOS_BOOTSTRAP_APP_REPO="$GUI_REPO" \
+    MEGAPOLOS_BOOTSTRAP_APP_NAME="megapolos-gui" \
+    MEGAPOLOS_BOOTSTRAP_APP_PORT="80" \
+    MEGAPOLOS_BOOTSTRAP_APP_DOMAIN="$GUI_DOMAIN" \
+    MEGAPOLOS_BOOTSTRAP_APP_OUTER_PORT="3000" \
+    npm run bootstrap) || error "install.ts завершился с ошибкой"
+  success "Оркестрация Megapolos завершена"
+}
+
+# =============================================================================
+# 7. Запуск ядра
+# =============================================================================
+start_core() {
   info "Запуск megapolos-core..."
   pkill -f "nodemon index.ts" 2>/dev/null || true
   pkill -f "ts-node index.ts" 2>/dev/null || true
   for i in $(seq 1 15); do
-    python3 -c "import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',5100)) else 1)" 2>/dev/null && break
-    sleep 1
+    (exec 3<>/dev/tcp/127.0.0.1/5100) 2>/dev/null || break   # порт свободен
+    exec 3>&- 3<&-; sleep 1
   done
-  # NODE_TLS_REJECT_UNAUTHORIZED=0 — dockerode ходит на self-signed nginx:5102
-  cd /root/megapolos-core
+  cd "$CORE_DIR"
   NODE_TLS_REJECT_UNAUTHORIZED=0 nohup nodemon index.ts > /tmp/core.log 2>&1 &
   for i in $(seq 1 40); do grep -q "Server is running on port" /tmp/core.log 2>/dev/null && break; sleep 2; done
   grep -q "Server is running on port" /tmp/core.log || error "core не запустился (см. /tmp/core.log)"
-
-  ROOT_TOKEN=$(grep -oP "token: '\K[^']+" /tmp/core.log | head -1)
-  [[ -n "$ROOT_TOKEN" ]] || error "root-токен не найден"
-  success "core запущен (devMode=false)"
-}
-
-# =============================================================================
-# GraphQL helper
-# =============================================================================
-gql() {
-  curl -s http://localhost:5100/graphql -X POST \
-    -H 'Content-Type: application/json' -H "token: $ROOT_TOKEN" \
-    -d "{\"query\":$(echo "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')}"
-}
-
-# =============================================================================
-# 6. Registry-запись + нода + INIT/PREPARE/REGISTRY (через SSH)
-# =============================================================================
-setup_node() {
-  info "Создание DockerRegistry и ноды..."
-  gql "mutation { createDockerRegistry(values: { name: \"local\", host: \"$REGISTRY_HOST\", user: \"$REGISTRY_USER\", password: \"$REGISTRY_PASS\", isDefault: true }) { id } }" >/dev/null
-  NODE_ID=$(gql "mutation { createNode(values: { name: \"localhost\", host: \"127.0.0.1\", user: \"root\", password: \"root\" }) { id } }" | \
-    python3 -c "import json,sys; print(json.load(sys.stdin)['data']['createNode']['id'])")
-  [[ -n "$NODE_ID" ]] || error "не удалось создать ноду"
-
-  for step in "initNode:INIT" "prepareNodeForCore:PREPARE FOR CORE" "installRegistryToNode:INSTALL REGISTRY"; do
-    local mut="${step%%:*}"; local label="${step##*:}"
-    info "$label (Ansible по SSH к 127.0.0.1)..."
-    gql "mutation { ${mut}(id: \"$NODE_ID\") }" >/dev/null
-    sleep 5
-    for i in $(seq 1 60); do
-      local st; st=$(gql "{ getAllNode { lifeStatus } }" | python3 -c "import json,sys; print(json.load(sys.stdin)['data']['getAllNode'][0]['lifeStatus'])" 2>/dev/null)
-      [[ "$st" == "running" ]] && break
-      sleep 5
-    done
-    success "$label завершён"
-  done
-
-  # Проверка registry
-  docker login -u "$REGISTRY_USER" -p "$REGISTRY_PASS" "${REGISTRY_HOST}:443" >/dev/null 2>&1 \
-    && success "Registry доступен: ${REGISTRY_HOST}:443" \
-    || error "Registry недоступен"
+  ROOT_TOKEN=$(tr -d '\0' < /tmp/core.log | grep -oP "token: '\K[^']+" | head -1)
+  success "core запущен"
 }
 
 # =============================================================================
 # Main
 # =============================================================================
 ROOT_TOKEN=""
-NODE_ID=""
 
 setup_dockerd
 setup_ssh
 install_deps
 setup_repos_db
-configure_start_core
-setup_node
+configure_core
+bootstrap
+start_core
 
 echo ""
 echo -e "${GREEN}=====================================================${NC}"
-echo -e "${GREEN}  Megapolos devMode=false готов локально!${NC}"
+echo -e "${GREEN}  Megapolos готов локально (self-signed, TLS-bypass)${NC}"
 echo -e "${GREEN}=====================================================${NC}"
-echo -e "  Backend:  http://localhost:5100  (HTTPS proxy: 5104)"
+echo -e "  Backend:  http://localhost:5100"
+echo -e "  GUI:      https://${GUI_DOMAIN}"
 echo -e "  Registry: https://${REGISTRY_HOST}:443  (${REGISTRY_USER}/${REGISTRY_PASS})"
-echo -e "  Root CA:  /data/nginx/ssl/ca/ca.crt"
+echo -e "  Root CA:  ${CORE_DIR}/data/ca/ca.crt  (или GET /api/ca/download)"
 echo -e "  Token:    ${ROOT_TOKEN}"
 echo ""
-echo -e "  Дальше: добавь app/image через GUI или API — образы будут"
-echo -e "  пушиться в приватный registry и пуллиться при деплое (как в prod)."
+echo -e "  Оркестрация выполнена install.ts (нода, INIT/PREPARE/REGISTRY, деплой)."
+echo -e "  Образы пушатся в приватный registry и пуллятся при деплое (как в prod)."
 echo -e "${GREEN}=====================================================${NC}"

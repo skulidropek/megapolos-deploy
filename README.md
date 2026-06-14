@@ -37,11 +37,11 @@ install.ts ( нода → INIT → PREPARE FOR CORE → INSTALL REGISTRY → д�
   свой dockerd, docker-in-docker; иначе не соберутся/не задеплоятся образы).
 - ~15–25 минут на полный прогон (зависимости + `npm install` + настройка ноды + сборка образа приложения).
 
-> **Запускается от root.** Megapolos — root-оркестратор (управляет Docker daemon, swarm,
-> `/etc/docker`, ansible, nginx), поэтому скрипт **всегда исполняется от root** и при запуске
-> не из-под root **сам перезапускается через `sudo`**. Это даёт единообразное владение файлами
-> и одинаковое поведение на сервере и локально. Устанавливается в **`/opt/megapolos`**
-> (переопределяется через `MEGAPOLOS_DIR`).
+> **Требуется root — запускай через `sudo`.** В `devMode` ядро запускает локальный ansible
+> под `uid 0` (см. core `Process.ts`) с `become`, поэтому Megapolos должен работать от root.
+> Скрипт **не поднимается автоматически**: при запуске не из-под root он завершится с подсказкой
+> запустить через `sudo`. Устанавливается в **`/opt/megapolos`** (переопределяется через
+> `MEGAPOLOS_DIR`). Всё единообразно root-owned → чистить/удалять через `sudo`.
 
 ---
 
@@ -55,7 +55,6 @@ curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy
 
 ```bash
 sudo bash deploy.sh
-# либо просто `bash deploy.sh` — скрипт сам поднимется до root через sudo
 ```
 
 ---

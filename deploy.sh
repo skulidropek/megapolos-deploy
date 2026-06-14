@@ -15,16 +15,15 @@ info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
 success() { echo -e "${GREEN}[OK]${NC} $*"; }
 error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 
-# Megapolos — root-оркестратор (Docker daemon, swarm, /etc/docker, ansible, nginx).
-# Запускаемся ВСЕГДА от root: единообразное владение файлами и одинаковое поведение
-# на сервере и локально. Если не root — перезапускаем себя через sudo.
+# Megapolos в devMode запускает локальный ansible под uid 0 (см. core Process.ts) с
+# become — поэтому ядро ДОЛЖНО работать от root. Автоматически НЕ поднимаемся: запуск
+# под root — осознанное решение пользователя (он сам пишет sudo).
 if [ "$(id -u)" -ne 0 ]; then
-  if [ -f "$0" ]; then
-    echo -e "${BLUE}[INFO]${NC} Требуются права root — перезапуск через sudo..."
-    exec sudo -E bash "$0" "$@"
-  else
-    error "Запусти от root:  curl -fsSL <url> | sudo bash"
-  fi
+  error "Megapolos требует root (в devMode ядро спавнит локальный ansible под uid 0).
+       Запусти через sudo, например:
+         curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh | sudo bash
+       или, если скрипт скачан:
+         sudo bash deploy.sh"
 fi
 
 # sudo может отсутствовать (минимальный образ) — он нужен внутренним вызовам

@@ -100,7 +100,13 @@ install_deps() {
     docker info &>/dev/null || { service docker start 2>/dev/null || systemctl start docker 2>/dev/null || true; sleep 2; }
   fi
   docker info &>/dev/null || error "dockerd не запустился (WSL: проверь, что Docker Desktop WSL-интеграция выключена и /var/log/dockerd.log)"
-  docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active || docker swarm init 2>/dev/null || true
+  # swarm init с явным --advertise-addr: в WSL у дистрибутива несколько IP (lo + eth0),
+  # и без адреса docker swarm init не может выбрать, какой анонсировать
+  local SWARM_IP; SWARM_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+  [ -z "$SWARM_IP" ] && SWARM_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active \
+    || docker swarm init ${SWARM_IP:+--advertise-addr "$SWARM_IP"} 2>/dev/null \
+    || docker swarm init --advertise-addr eth0 2>/dev/null || true
 
   # ansible (современный) + python-зависимости (нужны ansible-модулям docker/crypto)
   apt-get install -y ansible -qq >/dev/null 2>&1 || true

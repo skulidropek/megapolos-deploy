@@ -21,9 +21,9 @@ error()   { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 if [ "$(id -u)" -ne 0 ]; then
   error "Megapolos требует root (в devMode ядро спавнит локальный ansible под uid 0).
        Запусти через sudo, например:
-         curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh | sudo bash
+         curl -fsSL https://raw.githubusercontent.com/skulidropek/megapolos-deploy/deploy/deploy.sh | bash
        или, если скрипт скачан:
-         sudo bash deploy.sh"
+         bash deploy.sh"
 fi
 
 # sudo может отсутствовать (минимальный образ) — он нужен внутренним вызовам
@@ -58,43 +58,43 @@ install_deps() {
   info "Установка системных зависимостей..."
   export DEBIAN_FRONTEND=noninteractive
   # не роняем установку из-за подвисшего зеркала (частичный fail update — индексы пригодны)
-  sudo -E apt-get update -qq || sudo -E apt-get update -qq || true
-  sudo -E apt-get install -y curl git python3-pip openssl -qq >/dev/null
+  apt-get update -qq || apt-get update -qq || true
+  apt-get install -y curl git python3-pip openssl -qq >/dev/null
 
   if ! node --version 2>/dev/null | grep -q "^v18"; then
-    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - >/dev/null
-    sudo -E apt-get install -y nodejs >/dev/null
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - >/dev/null
+    apt-get install -y nodejs >/dev/null
   fi
-  command -v nodemon &>/dev/null || sudo npm install -g nodemon ts-node >/dev/null
+  command -v nodemon &>/dev/null || npm install -g nodemon ts-node >/dev/null
   # PostgreSQL ставить через apt НЕ нужно — поднимем свой в Docker (см. setup_postgres)
 
   if ! command -v docker &>/dev/null; then
-    curl -fsSL https://get.docker.com | sudo sh >/dev/null 2>&1 || true
+    curl -fsSL https://get.docker.com | sh >/dev/null 2>&1 || true
     command -v docker &>/dev/null || error "Docker не установился"
   fi
   # запуск dockerd
   if [[ -f /.dockerenv ]]; then
     # внутри контейнера свой dockerd ОБЯЗАН быть на vfs (overlay-в-overlay не монтируется)
-    sudo mkdir -p /etc/docker
-    grep -q '"vfs"' /etc/docker/daemon.json 2>/dev/null || echo '{ "storage-driver": "vfs" }' | sudo tee /etc/docker/daemon.json >/dev/null
+    mkdir -p /etc/docker
+    grep -q '"vfs"' /etc/docker/daemon.json 2>/dev/null || echo '{ "storage-driver": "vfs" }' | tee /etc/docker/daemon.json >/dev/null
     if ! docker info 2>/dev/null | grep -q 'Storage Driver: vfs'; then
-      sudo pkill dockerd 2>/dev/null || true; sleep 2
-      sudo bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'
+      pkill dockerd 2>/dev/null || true; sleep 2
+      bash -c 'nohup dockerd > /var/log/dockerd.log 2>&1 &'
       for i in $(seq 1 20); do docker info &>/dev/null && break; sleep 2; done
     fi
   else
-    docker info &>/dev/null || { sudo service docker start 2>/dev/null || sudo systemctl start docker 2>/dev/null || true; sleep 2; }
+    docker info &>/dev/null || { service docker start 2>/dev/null || systemctl start docker 2>/dev/null || true; sleep 2; }
   fi
   docker info &>/dev/null || error "dockerd не запустился"
   docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null | grep -q active || docker swarm init 2>/dev/null || true
 
   # ansible (современный) + python-зависимости (нужны ansible-модулям docker/crypto)
-  sudo -E apt-get install -y ansible -qq >/dev/null 2>&1 || true
-  sudo pip3 install --upgrade pip -q 2>/dev/null || true
+  apt-get install -y ansible -qq >/dev/null 2>&1 || true
+  pip3 install --upgrade pip -q 2>/dev/null || true
   # --ignore-installed: не удалять системный (debian) urllib3 2.x (нет RECORD-файла → pip падает)
-  sudo pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' \
+  pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' \
     --break-system-packages --ignore-installed -q 2>/dev/null || \
-    sudo pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' --ignore-installed -q 2>/dev/null || true
+    pip3 install 'ansible>=9' docker jsondiff cryptography passlib 'requests<2.32' 'urllib3<2' --ignore-installed -q 2>/dev/null || true
   ansible-galaxy collection install community.docker community.general community.crypto >/dev/null 2>&1 || true
   success "Зависимости установлены"
 }
@@ -106,13 +106,13 @@ clone_core() {
   # прошлый прогон запускал ядро/bootstrap под sudo → часть файлов (temp/, data/,
   # repositories/) принадлежит root. Заберём владение каталогом, иначе git pull /
   # npm / последующая чистка упрутся в "Permission denied".
-  sudo chown -R "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
+  chown -R "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
   if [[ -d "$CORE_DIR/.git" ]]; then
     git -C "$CORE_DIR" pull --ff-only 2>/dev/null || true
   else
     # форсим удаление через sudo — каталог мог остаться от прошлого sudo-прогона
     # с root-овыми файлами (обычный rm их не возьмёт → git clone упадёт "not empty")
-    sudo rm -rf "$CORE_DIR"
+    rm -rf "$CORE_DIR"
     git clone --branch "$CORE_BRANCH" "$CORE_REPO" "$CORE_DIR"
   fi
   success "Ядро склонировано"
@@ -183,18 +183,18 @@ bootstrap_and_start() {
     MEGAPOLOS_BOOTSTRAP_APP_PORT="80" \
     MEGAPOLOS_BOOTSTRAP_APP_DOMAIN="$GUI_DOMAIN" \
     MEGAPOLOS_BOOTSTRAP_APP_OUTER_PORT="3000" \
-    sudo -E npm run bootstrap) || error "install.ts завершился с ошибкой"
+    npm run bootstrap) || error "install.ts завершился с ошибкой"
   success "Оркестрация Megapolos завершена"
 
   info "Запуск ядра (megapolos-core)..."
   # лог НЕ в /tmp: на новых Ubuntu fs.protected_regular не даёт писать в чужой файл
   # в sticky-каталоге даже root. Кладём рядом с установкой.
   local CORE_LOG="$INSTALL_DIR/core.log"
-  sudo pkill -f "nodemon index.ts" 2>/dev/null || true
-  sudo pkill -f "ts-node index.ts" 2>/dev/null || true
-  sudo fuser -k ${CORE_PORT}/tcp 2>/dev/null || true
+  pkill -f "nodemon index.ts" 2>/dev/null || true
+  pkill -f "ts-node index.ts" 2>/dev/null || true
+  fuser -k ${CORE_PORT}/tcp 2>/dev/null || true
   sleep 3
-  nohup bash -c "cd '$CORE_DIR' && sudo nodemon index.ts" > "$CORE_LOG" 2>&1 &
+  nohup bash -c "cd '$CORE_DIR' && nodemon index.ts" > "$CORE_LOG" 2>&1 &
   local t=60
   while [[ $t -gt 0 ]]; do grep -q "Server is running on port" "$CORE_LOG" 2>/dev/null && break; sleep 2; ((t-=2)); done
   grep -q "Server is running on port" "$CORE_LOG" || error "Ядро не запустилось (см. $CORE_LOG)"

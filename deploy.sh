@@ -50,10 +50,13 @@ pick_free_port() {
 }
 
 # приложение для авто-деплоя (по умолчанию — Megapolos GUI). Пусто = не деплоить.
-GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://gitlab.com/megapolos/megapolos-gui.git}"
+# форк GUI: фронт берёт адрес API из config.server (HTTPS-домен), а не хардкод http://localhost:5100
+GUI_REPO="${MEGAPOLOS_GUI_REPO:-https://github.com/skulidropek/megapolos-gui.git}"
 # .localhost — браузеры (Edge/Chrome) сами резолвят *.localhost в 127.0.0.1 (без hosts/DNS),
 # поэтому любой {app}.megapolos.localhost открывается без правки hosts
 GUI_DOMAIN="${MEGAPOLOS_GUI_DOMAIN:-gui.megapolos.localhost}"
+# адрес API для фронта (env MEGAPOLOS_SERVER в GUI-контейнере): домен по HTTPS вместо localhost:5100
+GUI_API_URL="${MEGAPOLOS_GUI_API_URL:-https://api.megapolos.localhost}"
 
 # --- 1. системные зависимости (то, без чего ядро не стартует) ---
 install_deps() {
@@ -216,6 +219,7 @@ bootstrap_and_start() {
     MEGAPOLOS_BOOTSTRAP_APP_PORT="80" \
     MEGAPOLOS_BOOTSTRAP_APP_DOMAIN="$GUI_DOMAIN" \
     MEGAPOLOS_BOOTSTRAP_APP_OUTER_PORT="3000" \
+    MEGAPOLOS_BOOTSTRAP_APP_SERVER="$GUI_API_URL" \
     npm run bootstrap) || error "install.ts завершился с ошибкой"
   success "Оркестрация Megapolos завершена"
 
